@@ -1,0 +1,16 @@
+# User unit: the queue over HTTP for other machines and apps.
+#   cp hopper-serve.service ~/.config/systemd/user/
+#   systemctl --user enable --now hopper-serve
+# Secrets referenced as env:NAME in config.toml go in the EnvironmentFile (chmod 600).
+[Unit]
+Description=Hopper job queue (HTTP)
+After=network-online.target
+
+[Service]
+EnvironmentFile=-%h/.config/hopper/env
+ExecStart=%h/.local/bin/hop serve --host 127.0.0.1 --port 8770 --quiet
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

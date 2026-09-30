@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hopper-queue"
+dynamic = ["version"]
+description = "A durable priority job queue for AI agents: one SQLite file, zero dependencies, CLI + MCP + HTTP."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Humdan" }]
+keywords = ["ai-agents", "job-queue", "mcp", "claude-code", "task-queue", "sqlite"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Humdan/hopper"
+Issues = "https://github.com/Humdan/hopper/issues"
+
+[project.scripts]
+hop = "hopper.cli:main"
+
+[tool.setuptools]
+packages = ["hopper"]
+
+[tool.setuptools.dynamic]
+version = { attr = "hopper.__version__" }

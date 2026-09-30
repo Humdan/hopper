@@ -1,0 +1,19 @@
+# User unit: an agent worker. Change --exec to your harness.
+#   cp hopper-worker.service ~/.config/systemd/user/
+#   systemctl --user enable --now hopper-worker
+[Unit]
+Description=Hopper worker
+After=network-online.target
+
+[Service]
+EnvironmentFile=-%h/.config/hopper/env
+ExecStart=%h/.local/bin/hop work --name %H --caps shell,git,web --slots 2 --reserve 1 \
+  --exec "claude -p --allowedTools 'Bash(hop:*),Read,Edit,Write,Grep,Glob'"
+Restart=on-failure
+RestartSec=10
+# Stopping releases running jobs back to the queue.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
