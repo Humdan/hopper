@@ -116,6 +116,8 @@ run = ["~/bin/lights", "{text}"]
 url = "http://127.0.0.1:8642/v1/chat/completions"
 key = "env:FALLBACK_KEY"
 model = "anthropic/claude-sonnet-5.5"
+extra = { provider = "openrouter" }   # merged into the request body
+headers = { "X-Session-Id" = "relay" }
 ```
 
 Run it with `examples/systemd/hopper-relay.service` (`Restart=always`), and

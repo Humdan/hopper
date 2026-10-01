@@ -310,7 +310,8 @@ class Relay:
             args = [a.replace("{%d}" % i, g or "") for a in args]
         try:
             p = subprocess.run(args, capture_output=True, text=True, timeout=60)
-            out = (p.stdout.strip() or "Done.") if p.returncode == 0 else f"That failed: {p.stderr.strip()[:300]}"
+            out = ((p.stdout.strip() or "Done.") if p.returncode == 0
+                   else p.stdout.strip() or f"That failed: {p.stderr.strip()[:300]}")
         except (OSError, subprocess.TimeoutExpired) as exc:
             out = f"That failed: {exc}"
         ch.send(msg.chat, out)
@@ -438,7 +439,8 @@ class Relay:
         headers = {"Content-Type": "application/json", **(fb.get("headers") or {})}
         if fb.get("key"):
             headers["Authorization"] = f"Bearer {resolve_secret(fb['key'])}"
-        body = {"model": fb.get("model", ""), "messages": [{"role": "user", "content": prompt}]}
+        body = {**(fb.get("extra") or {}), "model": fb.get("model", ""),
+                "messages": [{"role": "user", "content": prompt}]}
         req = urllib.request.Request(fb["url"], data=json.dumps(body).encode(), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=float(fb.get("timeout", 180))) as r:
