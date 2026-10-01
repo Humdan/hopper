@@ -1,0 +1,15 @@
+# User unit: the built-in media worker (transcribe, speak, describe, image jobs).
+#   cp hopper-media.service ~/.config/systemd/user/
+#   systemctl --user enable --now hopper-media
+[Unit]
+Description=Hopper media worker
+After=network-online.target
+
+[Service]
+EnvironmentFile=-%h/.config/hopper/env
+ExecStart=%h/.local/bin/hop work --builtin media --name %H-media --slots 2
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

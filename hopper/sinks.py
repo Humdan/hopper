@@ -16,7 +16,7 @@ import urllib.request
 from .config import Config
 from .util import HopperError
 
-SCHEMES = ("stdout", "file", "webhook", "telegram", "hook")
+SCHEMES = ("stdout", "file", "webhook", "telegram", "whatsapp", "hook")
 
 
 def validate(reply_to: str | None, cfg: Config) -> str | None:
@@ -33,9 +33,11 @@ def validate(reply_to: str | None, cfg: Config) -> str | None:
             raise HopperError("webhook reply_to must be webhook:https://...")
         if not any(rest.startswith(p) for p in cfg.webhook_allow):
             raise HopperError("webhook URL is not allowed; add its prefix to [sinks.webhook] allow")
-    elif scheme == "telegram":
-        if rest not in cfg.telegram_chats:
-            raise HopperError("telegram chat is not allowed; add it to [sinks.telegram] chats")
+    elif scheme in ("telegram", "whatsapp"):
+        allowed = set(cfg.telegram_chats if scheme == "telegram" else ())
+        allowed |= {str(c) for c in (cfg.channels.get(scheme) or {}).get("allow") or ()}
+        if rest not in allowed:
+            raise HopperError(f"{scheme} chat is not allowed; add it to [channels.{scheme}] allow")
     elif scheme == "hook":
         if rest not in cfg.hooks:
             raise HopperError(f"no hook named {rest!r} in [hooks]")
@@ -85,6 +87,10 @@ def deliver(target: str, notice: dict, cfg: Config) -> None:
         with urllib.request.urlopen(req, timeout=15) as r:
             if r.status >= 300:
                 raise HopperError(f"webhook answered HTTP {r.status}")
+    elif scheme in ("telegram", "whatsapp") and scheme in cfg.channels:
+        from . import channels
+        files = [p for p in notice.get("artifacts") or [] if os.path.isfile(p)]
+        channels.send(cfg, target, render_text(notice), files)
     elif scheme == "telegram":
         token = os.environ.get("HOPPER_TELEGRAM_TOKEN")
         if not token:

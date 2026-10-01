@@ -167,7 +167,8 @@ class Hopper:
         cols = ", ".join(f"{k} = ?" for k in fields)
         db.execute(f"UPDATE jobs SET {cols} WHERE id = ?", (*fields.values(), job_id))
 
-    def _notify(self, db, job: dict, event: str, text: str | None = None) -> None:
+    def _notify(self, db, job: dict, event: str, text: str | None = None,
+                artifacts=None) -> None:
         if not job.get("reply_to"):
             return
         notice = {
@@ -176,6 +177,8 @@ class Hopper:
             "text": text,
             "job": {k: job.get(k) for k in ("id", "queue", "title", "priority", "source", "status")},
         }
+        if artifacts:   # files a chat sink can attach (generated images, voice notes)
+            notice["artifacts"] = list(artifacts)
         db.execute("INSERT INTO outbox(job_id, target, payload, next_at) VALUES (?,?,?,?)",
                    (job["id"], job["reply_to"], json.dumps(notice), now()))
 
@@ -187,7 +190,7 @@ class Hopper:
         self._event(db, job["id"], status, actor, **({"reason": reason} if reason else {}))
         job = self._get(db, job["id"])
         text = (result or {}).get("summary") if status == "done" else reason
-        self._notify(db, job, status, text)
+        self._notify(db, job, status, text, (result or {}).get("artifacts") if status == "done" else None)
 
         if status in ("failed", "cancelled"):
             # Dependents can never run now; fail them with a clear reason.
@@ -240,8 +243,17 @@ class Hopper:
             key: str | None = None, parent_id: str | None = None, depends_on=None,
             not_before=None, max_attempts: int = 3, timeout="15m",
             done_when: str | None = None, meta: dict | None = None,
-            actor: str | None = None) -> dict:
-        """Queue a job. With a key that matches an open job, returns that job instead."""
+            actor: str | None = None, type: str | None = None, input: dict | None = None) -> dict:
+        """Queue a job. With a key that matches an open job, returns that job instead.
+
+        `type` makes it a built-in media job (transcribe, speak, describe, image, video) with
+        `input` as its arguments; it then requires the capability "media.<type>"."""
+        if type:
+            from .media import TYPES
+            if type not in TYPES:
+                raise HopperError(f"unknown job type {type!r}; known: {', '.join(TYPES)}")
+            meta = {**(meta or {}), "type": type, "input": input or {}}
+            requires = sorted(set(_list(requires)) | {f"media.{type}"})
         with self._tx() as db:
             return self._insert(db, title, body, queue=queue, priority=priority,
                                 requires=requires, tags=tags, source=source, reply_to=reply_to,

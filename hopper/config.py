@@ -58,6 +58,9 @@ class Config:
     telegram_chats: tuple[str, ...] = ()        # chats the telegram sink may message
     webhook_allow: tuple[str, ...] = ()          # URL prefixes the webhook sink may call
     file_dir: str = ""                           # the file sink writes only under here
+    channels: dict[str, dict] = field(default_factory=dict)   # [channels.<name>] tables, raw
+    relay: dict = field(default_factory=dict)                 # [relay] table, raw
+    media: dict = field(default_factory=dict)                 # [media] table, raw
 
     def policy(self, queue: str) -> QueuePolicy:
         return self.queues.get(queue) or self.queues.get("*") or QueuePolicy()
@@ -100,6 +103,10 @@ def load(path: str | None = None) -> Config:
         if not argv or not all(isinstance(a, str) for a in argv):
             raise HopperError(f"hook {name!r} must be a command list, e.g. [\"/usr/bin/notify\"]")
         cfg.hooks[name] = [expand(argv[0])] + argv[1:]
+
+    cfg.channels = {name: dict(conf) for name, conf in (raw.get("channels") or {}).items()}
+    cfg.relay = dict(raw.get("relay") or {})
+    cfg.media = dict(raw.get("media") or {})
 
     sinks = raw.get("sinks") or {}
     cfg.telegram_chats = tuple(str(c) for c in (sinks.get("telegram", {}).get("chats") or ()))

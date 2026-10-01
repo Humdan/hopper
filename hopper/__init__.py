@@ -1,6 +1,6 @@
 """Hopper: a durable priority job queue for AI agents."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .util import HopperError  # noqa: E402
 from .core import Hopper  # noqa: E402

@@ -1,0 +1,18 @@
+# User unit: chat with Claude Code from Telegram/WhatsApp (needs [relay] in config.toml).
+#   cp hopper-relay.service ~/.config/systemd/user/
+#   systemctl --user enable --now hopper-relay
+#   loginctl enable-linger $USER     # keep it running when you're logged out
+# The relay holds no AI itself; Claude Code starts per conversation and exits when idle.
+[Unit]
+Description=Hopper relay (chat -> Claude Code)
+After=network-online.target
+
+[Service]
+EnvironmentFile=-%h/.config/hopper/env
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/hop relay
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

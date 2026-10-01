@@ -38,7 +38,11 @@ TOOLS = [
             "key": _S, "depends_on": _ARR,
             "not_before": {**_S, "description": "Earliest start: ISO time, epoch, or +10m"},
             "timeout": {**_S, "description": "Lease length without a heartbeat, e.g. 15m"},
-            "max_attempts": {"type": "integer"}}},
+            "max_attempts": {"type": "integer"},
+            "type": {**_S, "description": "Built-in media job: transcribe, speak, describe, image "
+                                          "(video generation is not available)"},
+            "input": {"type": "object", "description": "Arguments for a typed job: transcribe {file}, "
+                      "speak {text, voice?}, describe {file, question?}, image {prompt, files?: [paths to edit]}"}}},
     },
     {
         "name": "hop_list",

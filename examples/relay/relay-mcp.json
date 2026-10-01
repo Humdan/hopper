@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "hopper": { "command": "hop", "args": ["mcp"] }
+  }
+}

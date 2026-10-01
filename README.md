@@ -89,6 +89,19 @@ The full model is in [docs/design.md](docs/design.md).
 Set `HOPPER_URL` and `HOPPER_TOKEN` and the CLI, MCP server and workers talk to a remote
 `hop serve` instead of a local file, so many machines can share one queue.
 
+## Chat apps, media and the relay
+
+Optional, off unless configured ([docs/channels.md](docs/channels.md)):
+
+- **Channels:** Telegram and WhatsApp behind one interface with allowlists.
+  `hop send telegram:<chat> "text" --file chart.png`, and jobs can reply to a chat.
+- **Media job types:** `transcribe`, `speak`, `describe` and `image` run through
+  `hop work --builtin media` with an OpenRouter key: `hop add --type image "a fox at dusk"`.
+- **`hop relay`:** talk to Claude Code from your phone. A tiny always-on process keeps
+  Claude warm while you chat (about a second per reply) and lets it exit when you stop;
+  permission prompts come to the chat as yes/no, voice notes are transcribed, and a
+  fallback model answers if Claude can't. For your own use on your own machine.
+
 ## Integrations
 
 - [Claude Code](integrations/claude-code/README.md)
@@ -109,7 +122,7 @@ Set `HOPPER_URL` and `HOPPER_TOKEN` and the CLI, MCP server and workers talk to 
 
 ## Status
 
-v0.1: the core model, CLI, MCP, HTTP and runner are complete and tested (`python -m
+v0.2 adds channels (Telegram, WhatsApp), media job types and `hop relay`. v0.1: the core model, CLI, MCP, HTTP and runner are complete and tested (`python -m
 unittest discover -s tests -t .`). Next: a Postgres backend for large deployments, a web
 view, recurring jobs.
 

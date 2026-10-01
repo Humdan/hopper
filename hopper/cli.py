@@ -41,6 +41,29 @@ SAMPLE_CONFIG = """\
 # allow = ["https://example.com/hooks/"]
 # [hooks]                         # reply_to = "hook:notify" runs this command
 # notify = ["/usr/local/bin/notify-me"]
+
+# Channels: messaging apps for `hop send`, `hop relay`, and reply_to = "telegram:<chat>".
+# [channels.telegram]
+# token = "env:HOPPER_TELEGRAM_TOKEN"
+# allow = ["123456789"]           # your numeric Telegram user id
+# [channels.whatsapp]             # Meta WhatsApp Cloud API; needs a public HTTPS webhook
+# token = "env:HOPPER_WHATSAPP_TOKEN"
+# phone_number_id = "1234567890"
+# app_secret = "env:HOPPER_WHATSAPP_APP_SECRET"
+# verify_token = "env:HOPPER_WHATSAPP_VERIFY"
+# listen = "127.0.0.1:8771"
+# allow = ["15551234567"]
+
+# Media job types (transcribe, speak, describe, image) use OpenRouter.
+# [media]
+# openrouter_key = "env:OPENROUTER_API_KEY"
+# image_model = "openai/gpt-5-image-mini"
+
+# `hop relay`: chat with Claude Code over the channels above. See docs/relay.md.
+# [relay]
+# channels = ["telegram"]
+# model = "sonnet"
+# warm_minutes = 10
 """
 
 
@@ -153,6 +176,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--timeout", default="15m", help="lease length without a heartbeat (default 15m)")
     sp.add_argument("--attempts", type=int, default=3, help="claims before it's failed (default 3)")
     sp.add_argument("--source", help="who is asking (default: $HOPPER_SOURCE or user@host)")
+    sp.add_argument("--type", help="built-in media job: transcribe, speak, describe, image "
+                                   "(the title is the prompt/text; --file is the input)")
+    sp.add_argument("--file", action="append", default=[], help="input file for a typed job (repeatable)")
     sp.add_argument("--json", action="store_true")
 
     sp = cmd("ls", "list jobs (open ones by default)")
@@ -247,10 +273,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     cmd("mcp", "run the MCP server on stdio (for agent harnesses)")
 
+    sp = cmd("send", "send a message (and files) to a chat through a configured channel")
+    sp.add_argument("address", help="channel:chat, e.g. telegram:123456789")
+    sp.add_argument("text", nargs="?", default="", help="the message ('-' for stdin)")
+    sp.add_argument("--file", action="append", default=[], help="attach a file (repeatable)")
+
+    cmd("relay", "chat with Claude Code from Telegram/WhatsApp (see [relay] in the config)")
+
+    sp = cmd("media-run", "run one claimed media job (used by `hop work --builtin media`)")
+    sp.add_argument("job_id")
+    worker_arg(sp)
+
     sp = cmd("work", "run an agent command as a worker")
-    sp.add_argument("--exec", dest="command", required=True,
+    sp.add_argument("--exec", dest="command",
                     help="command to run per job; placeholders {prompt_file} {job_id} {title}; "
                          "the brief is also on stdin")
+    sp.add_argument("--builtin", choices=["media"],
+                    help="run Hopper's own handlers instead of an agent (media: transcribe, speak, "
+                         "describe, image)")
     sp.add_argument("--shell", action="store_true", help="run --exec through /bin/sh")
     sp.add_argument("--name", help="worker name (default host-pid)")
     sp.add_argument("-c", "--caps", help="capabilities this worker has, comma-separated")
@@ -298,7 +338,11 @@ def _run(a) -> int:
         return 0
 
     if a.cmd == "add":
-        job = hop.add(title=a.title, body=_read_text(a.body) or "", done_when=a.done_when,
+        typed = {}
+        if a.type:
+            from .media import job_input
+            typed = {"type": a.type, "input": job_input(a.type, a.title, _read_text(a.body) or "", a.file)}
+        job = hop.add(title=a.title, body=_read_text(a.body) or "", done_when=a.done_when, **typed,
                       priority=a.priority, queue=a.queue, requires=_csv(a.requires),
                       tags=_csv(a.tags), reply_to=a.reply_to, key=a.key,
                       depends_on=_csv(a.after), not_before=a.not_before, timeout=a.timeout,
@@ -416,9 +460,48 @@ def _run(a) -> int:
         serve(hop, host=a.host, port=a.port, no_auth=a.no_auth, quiet=a.quiet)
         return 0
 
+    if a.cmd == "send":
+        from . import channels
+        from .config import load
+        text = _read_text(a.text) or ""
+        if not text.strip() and not a.file:
+            raise HopperError("nothing to send: give text or --file")
+        channels.send(load(), a.address, text, a.file)
+        return 0
+
+    if a.cmd == "relay":
+        from .config import load
+        from .relay import Relay
+        return Relay(load()).run()
+
+    if a.cmd == "media-run":
+        from .config import load
+        from .media import Media
+        job = hop.show(job_id=a.job_id)
+        meta = job.get("meta") or {}
+        if isinstance(meta, str):
+            meta = json.loads(meta or "{}")
+        try:
+            out = Media(load()).run(meta.get("type", ""), meta.get("input") or {})
+        except HopperError as exc:
+            hop.fail(job_id=a.job_id, worker=worker, reason=str(exc), retry=False)
+            print(f"failed: {exc}", file=sys.stderr)
+            return 1
+        hop.complete(job_id=a.job_id, worker=worker, summary=out.get("summary") or "done",
+                     evidence=f"{meta.get('type')} via {os.path.basename(sys.argv[0])} media",
+                     artifacts=out.get("artifacts") or [])
+        print(out.get("summary", ""))
+        return 0
+
     if a.cmd == "work":
         from .util import parse_duration
         from .worker import Runner
+        if a.builtin == "media":
+            from .media import TYPES
+            a.command = f"{sys.executable} -m hopper media-run {{job_id}}"
+            a.caps = a.caps or ",".join(f"media.{t}" for t in TYPES if t != "video")
+        elif not a.command:
+            raise HopperError("give --exec COMMAND, or --builtin media")
         runner = Runner(hop, a.command, name=a.name, shell=a.shell, caps=_csv(a.caps),
                         queues=_csv(a.queues), tags=_csv(a.tags), slots=a.slots,
                         reserve=a.reserve, reserve_min_priority=a.reserve_min_priority,
