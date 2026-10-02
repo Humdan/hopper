@@ -138,12 +138,13 @@ def _print_report(r: dict) -> None:
         if g["key"] == "total":
             print("-" * len(head))
         started = g["started"]
-        cost = f"${g['cost_usd']:.2f}" + ("*" if g["priced_runs"] < g["runs"] else "")
+        cost = ("-" if not g["priced_runs"] else
+                f"${g['cost_usd']:.2f}" + ("*" if g["priced_runs"] < g["runs"] else ""))
         print(f"{str(g['key'])[:22]:<22} {g['jobs']:>5} {g['done']:>5} {g['failed']:>5} "
               f"{g['retries']:>5} {_hms(g['wait_s'] / started) if started else '-':>9} "
               f"{_hms(g['run_s']):>9} {cost:>9} "
               f"{_tokens(g['input_tokens']) + '/' + _tokens(g['output_tokens']):>15}")
-    if any(g["priced_runs"] < g["runs"] for g in rows):
+    if any(0 < g["priced_runs"] < g["runs"] for g in rows):
         print("\n* some runs didn't report a cost, so the real figure is higher")
 
 
