@@ -96,6 +96,16 @@ A claim picks, in one transaction, the best job the worker can take:
 run and their output, URLs checked, test results) and optional `artifacts` (paths, links).
 A queue can be configured to require evidence.
 
+### Projects and usage
+
+A job has an optional `project` (sub-jobs inherit it); the CLI and MCP server default it to
+`$HOPPER_PROJECT` or the current git repository's name. Each agent run is a row in the
+`usage` table: duration, cost in USD, input/output/cache tokens and model, plus the job's
+project and queue copied in so spend history outlives `gc`. Workers record a row per
+attempt (failures included) from the agent's output or `$HOPPER_USAGE_FILE`; agents can
+also pass usage to `complete`. `report` sums finished jobs (counts, retries, wait and run
+time) and usage (cost, tokens) over a window, grouped by project, queue, worker, day or week.
+
 ### Splitting work across sub-agents
 
 A worker that holds a big job can:

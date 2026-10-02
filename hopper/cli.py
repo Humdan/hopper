@@ -12,7 +12,7 @@ import time
 from . import __version__
 from .client import connect
 from .prompt import render
-from .util import HopperError, ago, iso, priority_name
+from .util import HopperError, ago, default_project, iso, priority_name
 
 STATUS_MARK = {
     "queued": "·", "running": "▶", "needs_input": "?", "waiting": "…",
@@ -98,11 +98,60 @@ def _row(job: dict) -> str:
             f"{job['queue']:<10} {job['title'][:70]}{owner}")
 
 
+def _hms(seconds: float) -> str:
+    s = int(round(seconds or 0))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{s % 3600 // 60:02d}m"
+
+
+def _tokens(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+
+def _print_usage(runs: list[dict]) -> None:
+    if not runs:
+        return
+    print("\nUsage:")
+    for u in runs:
+        parts = [f"attempt {u['attempt'] or '?'}", _hms(u["duration_s"]) if u["duration_s"] is not None else None,
+                 f"${u['cost_usd']:.4f}" if u["cost_usd"] is not None else "cost unknown",
+                 f"{_tokens(u['input_tokens'] or 0)} in / {_tokens(u['output_tokens'] or 0)} out"
+                 if u["input_tokens"] or u["output_tokens"] else None, u["model"]]
+        print("  " + " · ".join(p for p in parts if p))
+
+
+def _print_report(r: dict) -> None:
+    rows = r["rows"]
+    window = f"since {iso(r['since'])}" if r.get("since") else "all time"
+    if not rows:
+        print(f"no finished work or recorded usage ({window})")
+        return
+    head = (f"{r['by']:<22} {'jobs':>5} {'done':>5} {'fail':>5} {'retry':>5} "
+            f"{'avg wait':>9} {'run time':>9} {'cost':>9} {'tokens in/out':>15}")
+    print(f"Report by {r['by']}, {window}\n")
+    print(head)
+    print("-" * len(head))
+    for g in rows + [{**r["total"], "key": "total"}]:
+        if g["key"] == "total":
+            print("-" * len(head))
+        started = g["started"]
+        cost = f"${g['cost_usd']:.2f}" + ("*" if g["priced_runs"] < g["runs"] else "")
+        print(f"{str(g['key'])[:22]:<22} {g['jobs']:>5} {g['done']:>5} {g['failed']:>5} "
+              f"{g['retries']:>5} {_hms(g['wait_s'] / started) if started else '-':>9} "
+              f"{_hms(g['run_s']):>9} {cost:>9} "
+              f"{_tokens(g['input_tokens']) + '/' + _tokens(g['output_tokens']):>15}")
+    if any(g["priced_runs"] < g["runs"] for g in rows):
+        print("\n* some runs didn't report a cost, so the real figure is higher")
+
+
 def _print_job(job: dict, events=None) -> None:
     print(f"{job['id']}  [{job['status']}]  {job['title']}")
     print(f"  queue {job['queue']} · priority {job['priority']} ({priority_name(job['priority'])})"
           f" · attempts {job['attempts']}/{job['max_attempts']} · created {ago(job['created_at'])} ago")
-    for label, key in (("source", "source"), ("reply to", "reply_to"), ("key", "key"),
+    for label, key in (("project", "project"), ("source", "source"), ("reply to", "reply_to"), ("key", "key"),
                        ("parent", "parent_id"), ("held by", "lease_owner")):
         if job.get(key):
             print(f"  {label}: {job[key]}")
@@ -141,6 +190,13 @@ def _print_job(job: dict, events=None) -> None:
                   + (f" {json.dumps(extra)}" if extra else ""))
 
 
+def _done_usage(a) -> dict | None:
+    usage = {"cost_usd": a.cost, "input_tokens": a.tokens_in, "output_tokens": a.tokens_out,
+             "model": a.model}
+    usage = {k: v for k, v in usage.items() if v is not None}
+    return usage or None
+
+
 def _parse_child(spec: str) -> dict:
     title, sep, body = spec.partition("::")
     return {"title": title.strip(), "body": body.strip()} if sep else {"title": spec.strip()}
@@ -176,6 +232,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--timeout", default="15m", help="lease length without a heartbeat (default 15m)")
     sp.add_argument("--attempts", type=int, default=3, help="claims before it's failed (default 3)")
     sp.add_argument("--source", help="who is asking (default: $HOPPER_SOURCE or user@host)")
+    sp.add_argument("-P", "--project", help="project this is for, used by `hop report` "
+                                            "(default: $HOPPER_PROJECT or the current git repository)")
     sp.add_argument("--type", help="built-in media job: transcribe, speak, describe, image "
                                    "(the title is the prompt/text; --file is the input)")
     sp.add_argument("--file", action="append", default=[], help="input file for a typed job (repeatable)")
@@ -184,6 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = cmd("ls", "list jobs (open ones by default)")
     sp.add_argument("-s", "--status", default="open", help="open, all, or a status (comma-separated)")
     sp.add_argument("-q", "--queue")
+    sp.add_argument("-P", "--project")
     sp.add_argument("-t", "--tags")
     sp.add_argument("-n", "--limit", type=int, default=50)
     sp.add_argument("--json", action="store_true")
@@ -215,6 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-m", "--summary", required=True, help="what you did or found ('-' for stdin)")
     sp.add_argument("-e", "--evidence", help="what you ran or checked, and what you saw")
     sp.add_argument("-a", "--artifact", action="append", help="a path or link produced (repeatable)")
+    sp.add_argument("--cost", type=float, help="what this run cost, in USD")
+    sp.add_argument("--tokens-in", type=int, help="input tokens this run used")
+    sp.add_argument("--tokens-out", type=int, help="output tokens this run used")
+    sp.add_argument("--model", help="model that did the work")
 
     sp = cmd("fail", "give up on your job")
     sp.add_argument("job_id")
@@ -258,6 +321,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("job_id")
 
     sp = cmd("stats", "queue counts and health")
+    sp.add_argument("--json", action="store_true")
+
+    sp = cmd("report", "time and money spent, by project, queue, worker, day or week")
+    sp.add_argument("--since", default="7d", help="an age like 7d or 24h, an ISO time, or 'all' (default 7d)")
+    sp.add_argument("--until", help="end of the window (default now)")
+    sp.add_argument("--by", default="project", choices=["project", "queue", "worker", "day", "week"])
+    sp.add_argument("-P", "--project", help="only this project")
+    sp.add_argument("-q", "--queue", help="only this queue")
     sp.add_argument("--json", action="store_true")
 
     sp = cmd("gc", "trim finished jobs older than N days")
@@ -346,7 +417,7 @@ def _run(a) -> int:
                       priority=a.priority, queue=a.queue, requires=_csv(a.requires),
                       tags=_csv(a.tags), reply_to=a.reply_to, key=a.key,
                       depends_on=_csv(a.after), not_before=a.not_before, timeout=a.timeout,
-                      max_attempts=a.attempts,
+                      max_attempts=a.attempts, project=a.project or default_project(),
                       source=a.source or os.environ.get("HOPPER_SOURCE") or _default_worker())
         if a.json:
             _dump(job)
@@ -356,7 +427,8 @@ def _run(a) -> int:
         return 0
 
     if a.cmd == "ls":
-        jobs = hop.list(status=a.status, queue=a.queue, tags=_csv(a.tags), limit=a.limit)
+        jobs = hop.list(status=a.status, queue=a.queue, tags=_csv(a.tags), limit=a.limit,
+                        project=a.project)
         if a.json:
             _dump(jobs)
         elif not jobs:
@@ -371,11 +443,13 @@ def _run(a) -> int:
         events = hop.events(job_id=a.job_id) if (a.history or a.brief or a.json) else None
         if a.json:
             job["history"] = events
+            job["usage"] = hop.usage(job_id=a.job_id)
             _dump(job)
         elif a.brief:
             print(render(job, events=events))
         else:
             _print_job(job, events if a.history else None)
+            _print_usage(hop.usage(job_id=a.job_id))
         return 0
 
     if a.cmd == "claim":
@@ -400,7 +474,8 @@ def _run(a) -> int:
         "heartbeat": lambda: hop.heartbeat(job_id=a.job_id, worker=worker, extend=a.extend,
                                            progress=a.progress),
         "done": lambda: hop.complete(job_id=a.job_id, worker=worker, summary=_read_text(a.summary),
-                                     evidence=_read_text(a.evidence), artifacts=a.artifact),
+                                     evidence=_read_text(a.evidence), artifacts=a.artifact,
+                                     usage=_done_usage(a)),
         "fail": lambda: hop.fail(job_id=a.job_id, worker=worker, reason=a.reason,
                                  retry=not a.no_retry),
         "release": lambda: hop.release(job_id=a.job_id, worker=worker, reason=a.reason),
@@ -442,6 +517,15 @@ def _run(a) -> int:
             print(f"oldest waiting job: {s['oldest_queued_s'] // 60} min")
         if s.get("outbox_pending") or s.get("outbox_stuck"):
             print(f"notices: {s['outbox_pending']} pending, {s['outbox_stuck']} undeliverable")
+        return 0
+
+    if a.cmd == "report":
+        r = hop.report(since=None if a.since == "all" else a.since, until=a.until, by=a.by,
+                       project=a.project, queue=a.queue)
+        if a.json:
+            _dump(r)
+        else:
+            _print_report(r)
         return 0
 
     if a.cmd == "gc":

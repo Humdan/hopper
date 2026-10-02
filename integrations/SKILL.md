@@ -17,6 +17,7 @@ hop add "Short title of the job" \
   -p normal            # urgent | high | normal | low | background | idle, or 0-100
   # optional: -r shell,git (capabilities needed)  --key <dedupe-key>  --after <job-id>
   #           --at +2h (start later)  --reply-to telegram:<chat>|webhook:...|file:...
+  #           -P <project> (defaults to the git repo you're in; used by `hop report`)
 ```
 
 Write the job so a fresh agent with no context can finish it: say what, where, and how to
@@ -68,4 +69,5 @@ where it can. Children inherit the parent's queue and priority.
 hop ls                 # open jobs: running first, then what's next
 hop show <id> --history
 hop stats
+hop report --since 7d  # time and cost by project (--by day|week|queue|worker)
 ```

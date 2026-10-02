@@ -6,7 +6,8 @@ reports back with evidence. One SQLite file, zero dependencies, runs on a Raspbe
 
 ```sh
 hop add "Find out why the nightly build fails" -p high -d "root cause + a fix PR"
-hop work --caps shell,git --exec "claude -p --allowedTools 'Bash(hop:*),Read,Edit,Grep'"
+hop work --caps shell,git --exec "claude -p --output-format json --allowedTools 'Bash(hop:*),Read,Edit,Grep'"
+hop report --since 7d     # time and cost by project
 ```
 
 ## Why
@@ -64,6 +65,27 @@ hop split j_01J... --child "Collect logs :: ..." --child "Analyze :: ..."
 
 `hop <command> --help` documents every option.
 
+## Time and cost
+
+Every job belongs to a **project**: `-P/--project`, or by default `$HOPPER_PROJECT` or the
+name of the git repository it was queued from. Sub-jobs inherit it. Every agent run a worker
+does is recorded with how long it took and, when the agent reports it, what it cost:
+
+- `claude -p --output-format json` prints its cost and tokens; `hop work` reads them, and
+  uses the answer text (not the JSON) as the job's summary.
+- Any other agent can write `{"cost_usd": 0.12, "input_tokens": 900, "model": "..."}` to
+  `$HOPPER_USAGE_FILE`, or pass `hop done ... --cost 0.12 --tokens-in 900`.
+
+Failed attempts are counted too, because they cost money. Then:
+
+```sh
+hop report                      # last 7 days by project: jobs, retries, wait, run time, cost, tokens
+hop report --by day --since 30d
+hop report --by week -P website --json
+```
+
+Spend history is kept when `hop gc` trims old jobs.
+
 ## Concepts
 
 | | |
@@ -81,7 +103,7 @@ The full model is in [docs/design.md](docs/design.md).
 | | |
 |---|---|
 | `hop` | the CLI above |
-| `hop mcp` | MCP server on stdio: `hop_add`, `hop_claim`, `hop_complete`, `hop_split`, `hop_ask`, … |
+| `hop mcp` | MCP server on stdio: `hop_add`, `hop_claim`, `hop_complete`, `hop_split`, `hop_ask`, `hop_report`, … |
 | `hop serve` | HTTP API with scoped bearer tokens (`read`, `produce`, `work`, `admin`) |
 | `hop work` | runs any agent command as a worker: slots, reserved urgent slots, heartbeats, timeouts |
 | `from hopper import Hopper` | the Python library |
@@ -122,8 +144,9 @@ Optional, off unless configured ([docs/channels.md](docs/channels.md)):
 
 ## Status
 
-v0.2 adds channels (Telegram, WhatsApp), media job types and `hop relay`. v0.1: the core model, CLI, MCP, HTTP and runner are complete and tested (`python -m
-unittest discover -s tests -t .`). Next: a Postgres backend for large deployments, a web
-view, recurring jobs.
+v0.3 adds projects, per-run time and cost tracking, and `hop report`. v0.2 adds channels
+(Telegram, WhatsApp), media job types and `hop relay`. v0.1: the core model, CLI, MCP, HTTP and runner are complete and tested (`python -m
+unittest discover -s tests -t .`). Next: a Postgres backend for large deployments, a web view,
+recurring jobs.
 
 MIT licensed.

@@ -15,7 +15,7 @@ import sys
 from . import __version__
 from .client import connect
 from .prompt import render
-from .util import HopperError
+from .util import HopperError, default_project
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
@@ -39,6 +39,8 @@ TOOLS = [
             "not_before": {**_S, "description": "Earliest start: ISO time, epoch, or +10m"},
             "timeout": {**_S, "description": "Lease length without a heartbeat, e.g. 15m"},
             "max_attempts": {"type": "integer"},
+            "project": {**_S, "description": "Project this work is for, used by hop_report "
+                                             "(default: the git repository you're working in)"},
             "type": {**_S, "description": "Built-in media job: transcribe, speak, describe, image "
                                           "(video generation is not available)"},
             "input": {"type": "object", "description": "Arguments for a typed job: transcribe {file}, "
@@ -48,7 +50,7 @@ TOOLS = [
         "name": "hop_list",
         "description": "List jobs. status: open (default), all, or queued/running/needs_input/waiting/done/failed/cancelled.",
         "inputSchema": {"type": "object", "properties": {
-            "status": _S, "queue": _S, "tags": _ARR, "limit": {"type": "integer"}}},
+            "status": _S, "queue": _S, "tags": _ARR, "project": _S, "limit": {"type": "integer"}}},
     },
     {
         "name": "hop_show",
@@ -73,9 +75,12 @@ TOOLS = [
     {
         "name": "hop_complete",
         "description": "Mark your job done. summary: what you did or found. evidence: what you ran or checked "
-                       "just now and what you saw (not assumptions, not old logs).",
+                       "just now and what you saw (not assumptions, not old logs). usage (optional): what "
+                       "this run cost, if you know it.",
         "inputSchema": {"type": "object", "required": ["job_id", "summary"], "properties": {
-            **_JOB, "summary": _S, "evidence": _S, "artifacts": _ARR}},
+            **_JOB, "summary": _S, "evidence": _S, "artifacts": _ARR,
+            "usage": {"type": "object", "description": "{cost_usd, input_tokens, output_tokens, "
+                      "cache_read_tokens, cache_write_tokens, duration_s, model}"}}},
     },
     {
         "name": "hop_fail",
@@ -120,6 +125,15 @@ TOOLS = [
             **_JOB, "priority": {"type": ["string", "integer"]}}},
     },
     {
+        "name": "hop_report",
+        "description": "Time and money spent on finished work: jobs, retries, wait and run time, cost "
+                       "and tokens, grouped by project (default), queue, worker, day or week. since/until: "
+                       "an age like 7d (meaning the last 7 days), an ISO time, or an epoch.",
+        "inputSchema": {"type": "object", "properties": {
+            "since": _S, "until": _S, "by": {"type": "string", "enum": ["project", "queue", "worker", "day", "week"]},
+            "project": _S, "queue": _S}},
+    },
+    {
         "name": "hop_stats",
         "description": "Queue counts by status, oldest waiting job, and undelivered notices.",
         "inputSchema": {"type": "object", "properties": {}},
@@ -134,12 +148,15 @@ def _worker_name() -> str:
 def _call(hop, name: str, args: dict, worker: str):
     a = dict(args)
     if name == "hop_add":
+        if "project" not in a:
+            a["project"] = default_project()
         return hop.add(**a)
     if name == "hop_list":
         return hop.list(**a)
     if name == "hop_show":
         job = hop.show(job_id=a["job_id"])
         job["history"] = hop.events(job_id=a["job_id"])
+        job["usage"] = hop.usage(job_id=a["job_id"])
         return job
     if name == "hop_claim":
         job = hop.claim(worker=worker, **a)
@@ -164,6 +181,8 @@ def _call(hop, name: str, args: dict, worker: str):
         return hop.cancel(**a)
     if name == "hop_bump":
         return hop.bump(**a)
+    if name == "hop_report":
+        return hop.report(**a)
     if name == "hop_stats":
         return hop.stats()
     raise HopperError(f"unknown tool {name}")

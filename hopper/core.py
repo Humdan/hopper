@@ -14,9 +14,9 @@ from contextlib import contextmanager
 from . import sinks
 from .config import Config, load as load_config
 from .util import (ALL_STATES, OPEN_STATES, TERMINAL_STATES, HopperError, new_id, now,
-                   parse_duration, parse_priority, parse_when)
+                   parse_duration, parse_priority, parse_since, parse_when)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   finished_at   REAL,
   result        TEXT,
   thread        TEXT NOT NULL DEFAULT '[]',
-  meta          TEXT NOT NULL DEFAULT '{}'
+  meta          TEXT NOT NULL DEFAULT '{}',
+  project       TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_pick ON jobs(status, queue, priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS jobs_parent ON jobs(parent_id);
@@ -70,6 +71,27 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_job ON events(job_id, id);
 
+-- One row per agent run (attempt): what it cost and how long it took. Project and queue
+-- are copied in so spend history survives `gc` trimming the job itself.
+CREATE TABLE IF NOT EXISTS usage (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id             TEXT NOT NULL,
+  at                 REAL NOT NULL,
+  worker             TEXT,
+  project            TEXT,
+  queue              TEXT,
+  attempt            INTEGER,
+  duration_s         REAL,
+  cost_usd           REAL,
+  input_tokens       INTEGER,
+  output_tokens      INTEGER,
+  cache_read_tokens  INTEGER,
+  cache_write_tokens INTEGER,
+  model              TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_at ON usage(at);
+CREATE INDEX IF NOT EXISTS usage_job ON usage(job_id);
+
 CREATE TABLE IF NOT EXISTS outbox (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id       TEXT NOT NULL,
@@ -87,6 +109,10 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 
 _JSON_FIELDS = ("requires", "tags", "result", "thread", "meta")
 _OUTBOX_GIVE_UP = 10  # delivery attempts before a notice is left for inspection
+
+USAGE_NUMBERS = ("duration_s", "cost_usd", "input_tokens", "output_tokens",
+                 "cache_read_tokens", "cache_write_tokens")
+REPORT_BY = ("project", "queue", "worker", "day", "week")
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -122,8 +148,18 @@ class Hopper:
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(_SCHEMA)
+        self._migrate()
         self._db.execute("INSERT OR IGNORE INTO meta(k, v) VALUES ('schema', ?)",
                          (str(SCHEMA_VERSION),))
+
+    def _migrate(self) -> None:
+        """Bring a database made by an older Hopper up to date, in place."""
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(jobs)")}
+        if "project" not in cols:   # v1 -> v2
+            self._db.execute("ALTER TABLE jobs ADD COLUMN project TEXT")
+        self._db.execute("CREATE INDEX IF NOT EXISTS jobs_project ON jobs(project)")
+        self._db.execute("UPDATE meta SET v = ? WHERE k = 'schema' AND CAST(v AS INTEGER) < ?",
+                         (str(SCHEMA_VERSION), SCHEMA_VERSION))
 
     def close(self) -> None:
         self._db.close()
@@ -243,11 +279,13 @@ class Hopper:
             key: str | None = None, parent_id: str | None = None, depends_on=None,
             not_before=None, max_attempts: int = 3, timeout="15m",
             done_when: str | None = None, meta: dict | None = None,
-            actor: str | None = None, type: str | None = None, input: dict | None = None) -> dict:
+            actor: str | None = None, type: str | None = None, input: dict | None = None,
+            project: str | None = None) -> dict:
         """Queue a job. With a key that matches an open job, returns that job instead.
 
         `type` makes it a built-in media job (transcribe, speak, describe, image, video) with
-        `input` as its arguments; it then requires the capability "media.<type>"."""
+        `input` as its arguments; it then requires the capability "media.<type>".
+        `project` groups jobs for `report`; sub-jobs inherit their parent's."""
         if type:
             from .media import TYPES
             if type not in TYPES:
@@ -259,12 +297,13 @@ class Hopper:
                                 requires=requires, tags=tags, source=source, reply_to=reply_to,
                                 key=key, parent_id=parent_id, depends_on=depends_on,
                                 not_before=not_before, max_attempts=max_attempts,
-                                timeout=timeout, done_when=done_when, meta=meta, actor=actor)
+                                timeout=timeout, done_when=done_when, meta=meta, actor=actor,
+                                project=project)
 
     def _insert(self, db, title: str, body: str = "", *, queue: str = "default", priority=None,
                 requires=None, tags=None, source=None, reply_to=None, key=None,
                 parent_id=None, depends_on=None, not_before=None, max_attempts: int = 3,
-                timeout="15m", done_when=None, meta=None, actor=None) -> dict:
+                timeout="15m", done_when=None, meta=None, actor=None, project=None) -> dict:
         title = (title or "").strip()
         if not title:
             raise HopperError("a job needs a title")
@@ -281,6 +320,9 @@ class Hopper:
             queue = queue if queue != "default" else parent["queue"]
             if priority is None:
                 priority = parent["priority"]
+            if not project:
+                project = parent.get("project")
+        project = (project or "").strip() or None
         prio = parse_priority(priority)
         if key:
             existing = db.execute(
@@ -296,10 +338,12 @@ class Hopper:
         db.execute(
             "INSERT INTO jobs(id, queue, title, body, done_when, priority, requires, tags,"
             " source, reply_to, key, parent_id, not_before, max_attempts, timeout,"
-            " created_at, updated_at, meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " created_at, updated_at, meta, project)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, queue, title, body or "", done_when, prio, json.dumps(_list(requires)),
              json.dumps(_list(tags)), source, reply_to, key, parent_id,
-             parse_when(not_before), int(max_attempts), timeout_s, ts, ts, json.dumps(meta or {})))
+             parse_when(not_before), int(max_attempts), timeout_s, ts, ts, json.dumps(meta or {}),
+             project))
         for d in deps:
             db.execute("INSERT INTO deps(job_id, depends_on) VALUES (?,?)", (job_id, d))
         self._event(db, job_id, "added", actor or source, priority=prio)
@@ -401,7 +445,7 @@ class Hopper:
             return self._get(db, job_id)
 
     def complete(self, job_id: str, worker: str, summary: str, evidence: str | None = None,
-                 artifacts=None) -> dict:
+                 artifacts=None, usage: dict | None = None) -> dict:
         summary = (summary or "").strip()
         if not summary:
             raise HopperError("completing a job needs a summary of what was done")
@@ -412,6 +456,8 @@ class Hopper:
                                   "checked, and what you saw")
             result = {"summary": summary, "evidence": evidence, "artifacts": _list(artifacts),
                       "by": worker, "at": now()}
+            if usage:
+                self._usage(db, job, worker, usage)
             self._finish(db, job, "done", worker, result=result)
             return self._get(db, job_id)
 
@@ -461,7 +507,8 @@ class Hopper:
         if not children:
             raise HopperError("split needs at least one child")
         allowed = {"title", "body", "queue", "priority", "requires", "tags", "source", "key",
-                   "depends_on", "not_before", "max_attempts", "timeout", "done_when", "meta"}
+                   "depends_on", "not_before", "max_attempts", "timeout", "done_when", "meta",
+                   "project"}
         with self._tx() as db:  # all children or none
             job = self._owned(db, job_id, worker)
             created: list[str] = []
@@ -519,7 +566,8 @@ class Hopper:
                                 "ORDER BY created_at", (job_id,))]
         return job
 
-    def list(self, status="open", queue=None, tags=None, source=None, limit: int = 50) -> list[dict]:
+    def list(self, status="open", queue=None, tags=None, source=None, limit: int = 50,
+             project: str | None = None) -> list[dict]:
         where, params = [], []
         if status in (None, "", "all"):
             pass
@@ -539,6 +587,9 @@ class Hopper:
         if source:
             where.append("source = ?")
             params.append(source)
+        if project:
+            where.append("project = ?")
+            params.append(project)
         for tag in _list(tags):
             where.append("EXISTS (SELECT 1 FROM json_each(tags) g WHERE g.value = ?)")
             params.append(tag)
@@ -575,6 +626,133 @@ class Hopper:
             "SELECT COUNT(*) FROM outbox WHERE delivered_at IS NULL AND attempts >= ?",
             (_OUTBOX_GIVE_UP,)).fetchone()[0]
         return out
+
+    # ── usage and reports ──────────────────────────────────────────────────────
+
+    def _usage(self, db, job: dict, worker: str | None, usage: dict) -> None:
+        unknown = set(usage) - set(USAGE_NUMBERS) - {"model", "attempt"}
+        if unknown:
+            raise HopperError(f"unknown usage field(s) {', '.join(sorted(unknown))}; "
+                              f"use {', '.join(USAGE_NUMBERS)}, model")
+        nums = {}
+        for k in USAGE_NUMBERS:
+            v = usage.get(k)
+            if v in (None, ""):
+                continue
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise HopperError(f"usage {k} must be a number, got {v!r}") from None
+            if v < 0:
+                raise HopperError(f"usage {k} can't be negative")
+            nums[k] = v if k in ("duration_s", "cost_usd") else int(v)
+        if not nums:
+            raise HopperError("usage needs at least one of " + ", ".join(USAGE_NUMBERS))
+        attempt = usage.get("attempt") or job["attempts"] or None
+        db.execute(
+            "INSERT INTO usage(job_id, at, worker, project, queue, attempt, duration_s, cost_usd,"
+            " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, model)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job["id"], now(), worker, job.get("project"), job["queue"], attempt,
+             *(nums.get(k) for k in USAGE_NUMBERS), usage.get("model") or None))
+        self._event(db, job["id"], "usage", worker, **nums)
+
+    def record_usage(self, job_id: str, worker: str | None = None, **usage) -> dict:
+        """Record what one run of a job cost: duration_s, cost_usd, input/output/cache
+        token counts and model. Call once per attempt; failed attempts count too."""
+        with self._tx() as db:
+            self._usage(db, self._get(db, job_id), worker, usage)
+            return self._get(db, job_id)
+
+    def usage(self, job_id: str) -> list[dict]:
+        return [dict(r) for r in self._db.execute(
+            "SELECT * FROM usage WHERE job_id = ? ORDER BY id", (job_id,)).fetchall()]
+
+    def report(self, since=None, until=None, by: str = "project", project: str | None = None,
+               queue: str | None = None) -> dict:
+        """Time and money by project (or queue, worker, day, week) over a window.
+
+        Job figures cover jobs that finished in the window; cost covers runs recorded in
+        it. since/until take ISO times, epochs, or an age like '7d' (meaning 7 days ago)."""
+        if by not in REPORT_BY:
+            raise HopperError(f"can't report by {by!r}; use one of {', '.join(REPORT_BY)}")
+        start = parse_since(since) if since not in (None, "") else 0.0
+        end = parse_since(until) if until not in (None, "") else now()
+        if start >= end:
+            raise HopperError("the report window is empty: since must be before until")
+
+        def key_sql(ts_col: str, kind: str) -> str:
+            if by == "day":
+                return f"date({ts_col}, 'unixepoch', 'localtime')"
+            if by == "week":
+                return f"strftime('%Y-W%W', {ts_col}, 'unixepoch', 'localtime')"
+            if by == "worker":
+                return "json_extract(j.result, '$.by')" if kind == "jobs" else "u.worker"
+            return f"{'j' if kind == 'jobs' else 'u'}.{by}"
+
+        def filters(alias: str) -> tuple[str, list]:
+            sql, params = "", []
+            if project:
+                sql += f" AND {alias}.project = ?"
+                params.append(project)
+            if queue:
+                sql += f" AND {alias}.queue = ?"
+                params.append(queue)
+            return sql, params
+
+        rows: dict = {}
+
+        def row(key):
+            k = key if key not in (None, "") else "(none)"
+            return rows.setdefault(k, {
+                "key": k, "jobs": 0, "done": 0, "failed": 0, "cancelled": 0, "started": 0, "retries": 0,
+                "wait_s": 0.0, "run_s": 0.0, "runs": 0, "priced_runs": 0, "cost_usd": 0.0,
+                "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+                "cache_write_tokens": 0})
+
+        f_sql, f_params = filters("j")
+        for r in self._db.execute(f"""
+            SELECT {key_sql('j.finished_at', 'jobs')} AS k, j.status,
+                   COUNT(*) AS n, COUNT(j.started_at) AS started,
+                   SUM(MAX(j.attempts - 1, 0)) AS retries,
+                   SUM(CASE WHEN j.started_at IS NOT NULL THEN j.started_at - j.created_at ELSE 0 END) AS wait_s,
+                   SUM(COALESCE((SELECT SUM(u.duration_s) FROM usage u WHERE u.job_id = j.id),
+                                CASE WHEN j.started_at IS NOT NULL THEN j.finished_at - j.started_at END, 0)) AS run_s
+            FROM jobs j
+            WHERE j.status IN ('done','failed','cancelled')
+              AND j.finished_at >= ? AND j.finished_at < ? {f_sql}
+            GROUP BY k, j.status""", (start, end, *f_params)):
+            g = row(r["k"])
+            g["jobs"] += r["n"]
+            g[r["status"]] += r["n"]
+            g["started"] += r["started"]
+            g["retries"] += r["retries"] or 0
+            g["wait_s"] += r["wait_s"] or 0
+            g["run_s"] += r["run_s"] or 0
+
+        f_sql, f_params = filters("u")
+        for r in self._db.execute(f"""
+            SELECT {key_sql('u.at', 'usage')} AS k, COUNT(*) AS runs,
+                   COUNT(u.cost_usd) AS priced_runs, COALESCE(SUM(u.cost_usd), 0) AS cost_usd,
+                   COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(u.cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(u.cache_write_tokens), 0) AS cache_write_tokens
+            FROM usage u WHERE u.at >= ? AND u.at < ? {f_sql}
+            GROUP BY k""", (start, end, *f_params)):
+            g = row(r["k"])
+            for k in ("runs", "priced_runs", "cost_usd", "input_tokens", "output_tokens",
+                      "cache_read_tokens", "cache_write_tokens"):
+                g[k] += r[k]
+
+        out = sorted(rows.values(), key=lambda g: (g["key"] if by in ("day", "week") else
+                                                    (-g["cost_usd"], -g["run_s"], g["key"])))
+        total = {k: sum(g[k] for g in out) for k in out[0] if k != "key"} if out else {}
+        for g in out + ([total] if total else []):
+            g["cost_usd"] = round(g["cost_usd"], 6)
+            g["wait_s"] = round(g["wait_s"], 1)
+            g["run_s"] = round(g["run_s"], 1)
+        return {"since": start or None, "until": end, "by": by, "rows": out, "total": total}
 
     # ── housekeeping ───────────────────────────────────────────────────────────
 

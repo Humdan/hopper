@@ -8,7 +8,7 @@ After=network-online.target
 [Service]
 EnvironmentFile=-%h/.config/hopper/env
 ExecStart=%h/.local/bin/hop work --name %H --caps shell,git,web --slots 2 --reserve 1 \
-  --exec "claude -p --allowedTools 'Bash(hop:*),Read,Edit,Write,Grep,Glob'"
+  --exec "claude -p --output-format json --allowedTools 'Bash(hop:*),Read,Edit,Write,Grep,Glob'"
 Restart=on-failure
 RestartSec=10
 # Stopping releases running jobs back to the queue.

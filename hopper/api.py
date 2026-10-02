@@ -15,6 +15,8 @@ OPS: dict[str, str] = {
     "list": "read",
     "events": "read",
     "stats": "read",
+    "usage": "read",
+    "report": "read",
     # working
     "claim": "work",
     "heartbeat": "work",
@@ -24,6 +26,7 @@ OPS: dict[str, str] = {
     "ask": "work",
     "split": "work",
     "wait": "work",
+    "record_usage": "work",
     # housekeeping
     "retry": "admin",
     "flush": "admin",
@@ -39,7 +42,8 @@ SCOPES: dict[str, set[str]] = {
 }
 
 # Operations whose `worker` argument identifies the caller (namespaced per token).
-WORKER_OPS = {"claim", "heartbeat", "complete", "fail", "release", "ask", "split", "wait"}
+WORKER_OPS = {"claim", "heartbeat", "complete", "fail", "release", "ask", "split", "wait",
+              "record_usage"}
 # Operations that record who did it.
 ACTOR_OPS = {"add", "cancel", "bump", "answer", "retry"}
 

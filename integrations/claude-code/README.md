@@ -27,11 +27,11 @@ cp integrations/SKILL.md ~/.claude/skills/hopper/SKILL.md
 
 ```sh
 hop work --name claude --caps shell,git,web --slots 2 --reserve 1 \
-  --exec "claude -p --allowedTools 'Bash(hop:*),Read,Edit,Write,Grep,Glob'"
+  --exec "claude -p --output-format json --allowedTools 'Bash(hop:*),Read,Edit,Write,Grep,Glob'"
 ```
 
 `hop work` pipes each job's brief to `claude -p` on stdin, keeps the claim alive while it
-runs, and sets `HOPPER_JOB_ID` / `HOPPER_WORKER` so `hop done` inside the session needs no
+runs, records the run's cost, tokens and time from the JSON result (see `hop report`), and sets `HOPPER_JOB_ID` / `HOPPER_WORKER` so `hop done` inside the session needs no
 extra flags. `--reserve 1` keeps one slot free for `high`/`urgent` jobs.
 
 Choose the tool permissions deliberately: headless runs can't ask you to approve anything, so

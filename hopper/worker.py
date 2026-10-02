@@ -4,9 +4,14 @@ For each claimed job the runner writes the brief to a file, starts the command (
 stdin too), keeps the lease alive while it runs, and settles the job from the exit code
 if the agent didn't report itself. Reserved slots take only urgent work, so a request
 from a person never waits behind long background jobs.
+
+Every run is recorded as usage: how long it took and, when the agent says, what it cost.
+Cost comes from Claude Code's JSON result (`claude -p --output-format json`) or from a
+JSON file the agent writes to $HOPPER_USAGE_FILE.
 """
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import signal
@@ -50,6 +55,68 @@ def _tail(path: str, limit: int = 3000) -> str:
     return ("…" + text) if size > limit else text
 
 
+_USAGE_KEYS = ("cost_usd", "input_tokens", "output_tokens", "cache_read_tokens",
+               "cache_write_tokens", "model")
+
+
+def _read_tail(path: str, limit: int = 262144) -> str:
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - limit))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def agent_result(text: str) -> dict | None:
+    """Find the agent's final JSON result in its output, if it printed one.
+
+    Understands Claude Code's result object (`--output-format json`, or the last line of
+    `stream-json`) and a plain {"cost_usd": ..., "input_tokens": ...} object. Returns
+    {"usage": {...}, "text": final answer or None, "is_error": bool}, or None."""
+    candidates = [text.strip()] + [ln.strip() for ln in reversed(text.splitlines())]
+    for chunk in candidates:
+        if not (chunk.startswith("{") and chunk.endswith("}")):
+            continue
+        try:
+            obj = json.loads(chunk)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "result" or "total_cost_usd" in obj:   # Claude Code
+            u = obj.get("usage") or {}
+            models = list((obj.get("modelUsage") or {}).keys())
+            usage = {"cost_usd": obj.get("total_cost_usd"),
+                     "input_tokens": u.get("input_tokens"),
+                     "output_tokens": u.get("output_tokens"),
+                     "cache_read_tokens": u.get("cache_read_input_tokens"),
+                     "cache_write_tokens": u.get("cache_creation_input_tokens"),
+                     "model": ",".join(models) or None}
+            result = obj.get("result")
+            return {"usage": {k: v for k, v in usage.items() if v is not None},
+                    "text": result if isinstance(result, str) else None,
+                    "is_error": bool(obj.get("is_error"))}
+        usage = {k: obj[k] for k in _USAGE_KEYS if obj.get(k) is not None}
+        if usage:
+            return {"usage": usage, "text": None, "is_error": False}
+    return None
+
+
+def _usage_file(path: str) -> dict:
+    try:
+        with open(path) as fh:
+            obj = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    if "total_cost_usd" in obj and "cost_usd" not in obj:
+        obj["cost_usd"] = obj["total_cost_usd"]
+    return {k: obj[k] for k in _USAGE_KEYS if obj.get(k) is not None}
+
+
 class Runner:
     def __init__(self, hop, command: str, *, name: str | None = None, shell: bool = False,
                  caps=None, queues=None, tags=None, slots: int = 1, reserve: int = 0,
@@ -90,8 +157,10 @@ class Runner:
         with os.fdopen(fd, "w") as fh:
             fh.write(brief)
         log_path = os.path.join(self.log_dir, f"{job['id']}.log")
+        usage_file = prompt_file[:-3] + ".usage.json"
         env = dict(os.environ, **self.env_extra,
-                   HOPPER_JOB_ID=job["id"], HOPPER_WORKER=worker, HOPPER_PROMPT_FILE=prompt_file)
+                   HOPPER_JOB_ID=job["id"], HOPPER_WORKER=worker, HOPPER_PROMPT_FILE=prompt_file,
+                   HOPPER_USAGE_FILE=usage_file)
         if not os.environ.get("HOPPER_URL"):
             env["HOPPER_DB"] = self.hop.db_path  # the agent's `hop done` hits the same queue
         log = open(log_path, "ab")
@@ -105,19 +174,40 @@ class Runner:
             pass  # the command doesn't read stdin; it has the prompt file
         self.running[slot] = {"job": job, "proc": proc, "worker": worker, "log": log,
                               "log_path": log_path, "prompt_file": prompt_file,
+                              "usage_file": usage_file, "log_start": os.path.getsize(log_path),
                               "started": time.time(), "beat": time.time()}
         print(f"[{self.name}] slot {slot}: started {job['id']} (p{job['priority']}) {job['title']}",
               flush=True)
+
+    def _record(self, run, parsed: dict | None) -> None:
+        """Log this run's time and cost, unless the agent already recorded this attempt."""
+        job = run["job"]
+        attempt = job["attempts"]
+        try:
+            if any(u["attempt"] == attempt for u in self.hop.usage(job_id=job["id"])):
+                return
+            usage = {**((parsed or {}).get("usage") or {}), **_usage_file(run["usage_file"]),
+                     "duration_s": round(time.time() - run["started"], 3), "attempt": attempt}
+            self.hop.record_usage(job_id=job["id"], worker=run["worker"], **usage)
+        except HopperError as exc:
+            print(f"[{self.name}] could not record usage for {job['id']}: {exc}",
+                  file=sys.stderr, flush=True)
 
     def _settle(self, slot: int) -> None:
         run = self.running.pop(slot)
         run["log"].close()
         rc = run["proc"].returncode
         job_id, worker = run["job"]["id"], run["worker"]
+        # The log is appended to across attempts; read only what this run wrote.
+        this_run = os.path.getsize(run["log_path"]) - run["log_start"]
+        parsed = agent_result(_read_tail(run["log_path"], limit=min(this_run, 262144)))
+        self._record(run, parsed)
         try:
             job = self.hop.show(job_id=job_id)
             if job["status"] == "running" and job["lease_owner"] == worker:
-                out = _tail(run["log_path"])
+                out = (parsed or {}).get("text") or _tail(run["log_path"])
+                if parsed and parsed["is_error"]:
+                    rc = rc or 1
                 if rc == 0:
                     self.hop.complete(job_id=job_id, worker=worker,
                                       summary=out or "Finished (exit 0) with no output.",
@@ -132,10 +222,11 @@ class Runner:
         except HopperError as exc:
             outcome = f"could not settle: {exc}"
         finally:
-            try:
-                os.unlink(run["prompt_file"])
-            except OSError:
-                pass
+            for path in (run["prompt_file"], run["usage_file"]):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         self.handled += 1
         print(f"[{self.name}] slot {slot}: {job_id} {outcome}", flush=True)
 
@@ -148,6 +239,7 @@ class Runner:
         if self.max_runtime and t - run["started"] > self.max_runtime:
             self._kill(run)
             run["proc"].wait()
+            self._record(run, None)
             try:
                 self.hop.fail(job_id=run["job"]["id"], worker=run["worker"], retry=True,
                               reason=f"ran longer than {int(self.max_runtime)}s and was stopped")

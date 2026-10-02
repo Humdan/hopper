@@ -1,9 +1,10 @@
-"""Small shared helpers: ids, time parsing, priority names."""
+"""Small shared helpers: ids, time parsing, priority names, the default project."""
 from __future__ import annotations
 
 import os
 import re
 import secrets
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -106,6 +107,32 @@ def parse_when(value) -> float | None:
     if dt.tzinfo is None:
         dt = dt.astimezone()  # treat naive times as local
     return dt.timestamp()
+
+
+def parse_since(value) -> float | None:
+    """A point in the past: an age like '7d' or '12h' (that long ago), or anything
+    parse_when takes. Used for report windows, where '7d' means the last seven days."""
+    if value in (None, ""):
+        return None
+    s = str(value).strip()
+    if not s.startswith("+") and _DURATION.match(s):
+        return now() - parse_duration(s)
+    return parse_when(value)
+
+
+def default_project(cwd: str | None = None) -> str | None:
+    """The project a new job belongs to when none is given: $HOPPER_PROJECT, else the
+    name of the git repository the caller is working in, else none."""
+    env = os.environ.get("HOPPER_PROJECT")
+    if env is not None:
+        return env.strip() or None
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd,
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = out.stdout.strip() if out.returncode == 0 else ""
+    return os.path.basename(top) or None
 
 
 def iso(ts: float | None) -> str | None:
