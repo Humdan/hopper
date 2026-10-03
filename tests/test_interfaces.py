@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from unittest import mock
 
 from hopper import Hopper, HopperError, RemoteHopper
 from hopper.config import Config, Token
@@ -158,6 +159,21 @@ class Work(unittest.TestCase):
         job = self.hop.show(j["id"])
         self.assertEqual(job["status"], "queued")
         self.assertIn("exited 3", self.hop.events(j["id"])[-1]["reason"])
+
+    def test_missing_program_refuses_to_start(self):
+        j = self.hop.add("never claimed")
+        with self.assertRaises(HopperError) as ctx:
+            self.run_once("no-such-agent-xyz -p")
+        self.assertIn("not found", str(ctx.exception))
+        self.assertEqual(self.hop.show(j["id"])["status"], "queued")
+
+    def test_agent_that_cannot_start_fails_the_job(self):
+        j = self.hop.add("cannot start")
+        with mock.patch("hopper.worker.subprocess.Popen", side_effect=PermissionError("denied")):
+            self.run_once("true")
+        job = self.hop.show(j["id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("could not start the agent", self.hop.events(j["id"])[-1]["reason"])
 
     def test_idle_once_exits(self):
         self.assertEqual(self.run_once("true"), 0)

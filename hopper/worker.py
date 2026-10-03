@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -126,6 +127,12 @@ class Runner:
             raise HopperError("need slots >= 1 and 0 <= reserve < slots (or reserve 1 of 1)")
         self.hop = _Locked(hop)
         self.command, self.shell = command, shell
+        if not shell:
+            program = (shlex.split(command) or [""])[0]
+            if "{" not in program and not shutil.which(program):
+                # Refuse to start rather than claim jobs we can't run.
+                raise HopperError(f"--exec program not found: {program!r} (PATH is "
+                                  f"{os.environ.get('PATH', '')!r}); give an absolute path or fix PATH")
         self.name = name or f"{socket.gethostname()}-{os.getpid()}"
         self.caps, self.queues, self.tags = caps, queues, tags
         self.slots, self.reserve = slots, reserve
@@ -164,9 +171,23 @@ class Runner:
         if not os.environ.get("HOPPER_URL"):
             env["HOPPER_DB"] = self.hop.db_path  # the agent's `hop done` hits the same queue
         log = open(log_path, "ab")
-        proc = subprocess.Popen(self._argv(job, prompt_file), shell=self.shell, env=env,
-                                stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+        try:
+            proc = subprocess.Popen(self._argv(job, prompt_file), shell=self.shell, env=env,
+                                    stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+        except OSError as exc:
+            # The agent never started, so fail the job now instead of crashing the
+            # worker and leaving the job held until its lease runs out.
+            log.close()
+            os.unlink(prompt_file)
+            reason = f"could not start the agent: {exc}"
+            try:
+                self.hop.fail(job_id=job["id"], worker=worker, retry=False, reason=reason)
+            except HopperError as fail_exc:
+                reason += f" (and could not fail the job: {fail_exc})"
+            self.handled += 1
+            print(f"[{self.name}] slot {slot}: {job['id']} {reason}", file=sys.stderr, flush=True)
+            return
         try:
             proc.stdin.write(brief.encode())
             proc.stdin.close()
