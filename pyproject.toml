@@ -29,7 +29,10 @@ Issues = "https://github.com/Humdan/hopper/issues"
 hop = "hopper.cli:main"
 
 [tool.setuptools]
-packages = ["hopper"]
+packages = ["hopper", "hopper.channels", "hopper.ui"]
+
+[tool.setuptools.package-data]
+"hopper.ui" = ["*.html"]
 
 [tool.setuptools.dynamic]
 version = { attr = "hopper.__version__" }

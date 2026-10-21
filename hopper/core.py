@@ -16,7 +16,7 @@ from .config import Config, load as load_config
 from .util import (ALL_STATES, OPEN_STATES, TERMINAL_STATES, HopperError, new_id, now,
                    parse_duration, parse_priority, parse_since, parse_when)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -103,6 +103,21 @@ CREATE TABLE IF NOT EXISTS outbox (
   last_error   TEXT
 );
 CREATE INDEX IF NOT EXISTS outbox_due ON outbox(next_at) WHERE delivered_at IS NULL;
+
+-- Presence: every worker (a `hop work` process, a remote agent, a person at a shell) shows up here
+-- the first time it claims, and its row is refreshed on every claim and heartbeat.
+CREATE TABLE IF NOT EXISTS workers (
+  name         TEXT PRIMARY KEY,
+  caps         TEXT NOT NULL DEFAULT '[]',
+  queues       TEXT NOT NULL DEFAULT '[]',
+  addr         TEXT,
+  first_seen   REAL NOT NULL,
+  last_seen    REAL NOT NULL,
+  last_job     TEXT,
+  jobs_claimed INTEGER NOT NULL DEFAULT 0,
+  jobs_done    INTEGER NOT NULL DEFAULT 0,
+  jobs_failed  INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
@@ -202,6 +217,28 @@ class Hopper:
                 fields[f] = json.dumps(fields[f])
         cols = ", ".join(f"{k} = ?" for k in fields)
         db.execute(f"UPDATE jobs SET {cols} WHERE id = ?", (*fields.values(), job_id))
+
+    def _seen(self, db, worker: str, *, caps=None, queues=None, addr: str | None = None,
+              claimed: str | None = None, done: int = 0, failed: int = 0) -> None:
+        """Record that a worker was just heard from (presence + its counters)."""
+        t = now()
+        db.execute(
+            "INSERT INTO workers(name, caps, queues, addr, first_seen, last_seen, last_job, jobs_claimed, "
+            "jobs_done, jobs_failed) VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET last_seen = excluded.last_seen, "
+            "caps = CASE WHEN ? THEN excluded.caps ELSE caps END, "
+            "queues = CASE WHEN ? THEN excluded.queues ELSE queues END, "
+            "addr = COALESCE(excluded.addr, addr), "
+            "last_job = COALESCE(excluded.last_job, last_job), "
+            "jobs_claimed = jobs_claimed + excluded.jobs_claimed, "
+            "jobs_done = jobs_done + excluded.jobs_done, jobs_failed = jobs_failed + excluded.jobs_failed",
+            (worker, json.dumps(_list(caps)), json.dumps(_list(queues)), addr, t, t, claimed,
+             1 if claimed else 0, done, failed, caps is not None, queues is not None))
+
+    def note_worker(self, worker: str, addr: str | None = None) -> None:
+        """Remember where a worker connects from (called by `hop serve`)."""
+        with self._tx() as db:
+            self._seen(db, worker, addr=addr)
 
     def _notify(self, db, job: dict, event: str, text: str | None = None,
                 artifacts=None) -> None:
@@ -401,6 +438,7 @@ class Hopper:
         t = now()
         with self._tx() as db:
             self._reap(db)
+            self._seen(db, worker, caps=caps, queues=queues)
             q_marks = ",".join("?" * len(queues))
             sql = f"""
               SELECT j.* FROM jobs j
@@ -433,11 +471,13 @@ class Hopper:
                       lease_expires=t + job["timeout"], attempts=job["attempts"] + 1,
                       started_at=job["started_at"] or t)
             self._event(db, job["id"], "claimed", worker, attempt=job["attempts"] + 1)
+            self._seen(db, worker, claimed=job["id"])
             return self.show(job["id"], _db=db)
 
     def heartbeat(self, job_id: str, worker: str, extend=None, progress: str | None = None) -> dict:
         with self._tx() as db:
             job = self._owned(db, job_id, worker)
+            self._seen(db, worker)
             span = parse_duration(extend) if extend else job["timeout"]
             self._set(db, job_id, lease_expires=now() + span)
             if progress:
@@ -459,11 +499,13 @@ class Hopper:
             if usage:
                 self._usage(db, job, worker, usage)
             self._finish(db, job, "done", worker, result=result)
+            self._seen(db, worker, done=1)
             return self._get(db, job_id)
 
     def fail(self, job_id: str, worker: str, reason: str, retry: bool = True) -> dict:
         with self._tx() as db:
             job = self._owned(db, job_id, worker)
+            self._seen(db, worker, failed=1)
             if retry and job["attempts"] < job["max_attempts"]:
                 backoff = min(3600, 30 * 2 ** (job["attempts"] - 1))
                 self._set(db, job_id, status="queued", lease_owner=None, lease_expires=None,
@@ -626,6 +668,97 @@ class Hopper:
             "SELECT COUNT(*) FROM outbox WHERE delivered_at IS NULL AND attempts >= ?",
             (_OUTBOX_GIVE_UP,)).fetchone()[0]
         return out
+
+    # ── live view (the web UI and `hop serve` read these) ──────────────────────
+
+    ONLINE_S, AWAY_S = 60, 900   # seen within a minute = online; within 15 min = away
+
+    def workers(self) -> list[dict]:
+        """Everything that has claimed work, with a live status and what it is doing now."""
+        t = now()
+        busy: dict[str, list[dict]] = {}
+        for r in self._db.execute("SELECT id, title, queue, lease_owner, started_at, lease_expires "
+                                  "FROM jobs WHERE status = 'running' AND lease_owner IS NOT NULL"):
+            busy.setdefault(r["lease_owner"], []).append(
+                {"id": r["id"], "title": r["title"], "queue": r["queue"], "started_at": r["started_at"]})
+        out = []
+        for r in self._db.execute("SELECT * FROM workers ORDER BY last_seen DESC"):
+            w = dict(r)
+            w["caps"], w["queues"] = json.loads(w["caps"]), json.loads(w["queues"])
+            age = t - w["last_seen"]
+            jobs = busy.get(w["name"], [])
+            w["running"] = jobs
+            w["status"] = ("busy" if jobs and age < self.AWAY_S else
+                           "online" if age < self.ONLINE_S else "away" if age < self.AWAY_S else "offline")
+            w["seen_ago_s"] = round(age, 1)
+            out.append(w)
+        return out
+
+    def activity(self, limit: int = 40, since_id: int = 0) -> list[dict]:
+        """The newest events across all jobs, newest first, each with its job's title."""
+        rows = self._db.execute(
+            "SELECT e.id, e.at, e.kind, e.actor, e.data, e.job_id, j.title, j.queue FROM events e "
+            "LEFT JOIN jobs j ON j.id = e.job_id WHERE e.id > ? ORDER BY e.id DESC LIMIT ?",
+            (int(since_id), int(limit))).fetchall()
+        out = []
+        for r in rows:
+            d = json.loads(r["data"]) if r["data"] else {}
+            out.append({"id": r["id"], "at": r["at"], "kind": r["kind"], "actor": r["actor"],
+                        "job_id": r["job_id"], "title": r["title"], "queue": r["queue"],
+                        "text": d.get("text") or d.get("reason")})
+        return out
+
+    def overview(self, finished: int = 100, open_limit: int = 300) -> dict:
+        """One snapshot of everything a dashboard shows. Read-only and cheap."""
+        t = now()
+        db = self._db
+        counts = {s: 0 for s in ALL_STATES}
+        queues: dict[str, dict] = {}
+        for r in db.execute("SELECT queue, status, COUNT(*) n FROM jobs GROUP BY queue, status"):
+            counts[r["status"]] = counts.get(r["status"], 0) + r["n"]
+            queues.setdefault(r["queue"], {})[r["status"]] = r["n"]
+        oldest = db.execute("SELECT MIN(created_at) FROM jobs WHERE status = 'queued' AND "
+                            "(not_before IS NULL OR not_before <= ?)", (t,)).fetchone()[0]
+
+        def slim(r):
+            j = _row(r)
+            res = j.get("result") or {}
+            last = db.execute("SELECT data FROM events WHERE job_id = ? AND kind = 'progress' "
+                              "ORDER BY id DESC LIMIT 1", (j["id"],)).fetchone() if j["status"] == "running" else None
+            return {k: j.get(k) for k in ("id", "queue", "title", "status", "priority", "project", "source",
+                                          "tags", "lease_owner", "attempts", "max_attempts", "created_at",
+                                          "started_at", "finished_at", "updated_at", "not_before", "parent_id")} | {
+                "summary": (res.get("summary") or "")[:200] if isinstance(res, dict) else "",
+                "progress": (json.loads(last["data"]).get("text") if last and last["data"] else None)}
+
+        marks = ",".join("?" * len(OPEN_STATES))
+        jobs = [slim(r) for r in db.execute(
+            f"SELECT * FROM jobs WHERE status IN ({marks}) ORDER BY CASE status WHEN 'running' THEN 0 "
+            "WHEN 'needs_input' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END, priority DESC, created_at LIMIT ?",
+            (*OPEN_STATES, int(open_limit)))]
+        jobs += [slim(r) for r in db.execute(
+            "SELECT * FROM jobs WHERE status IN ('done','failed','cancelled') "
+            "ORDER BY finished_at DESC LIMIT ?", (int(finished),))]
+        hour = 3600
+        base = int(t // hour) * hour - 23 * hour
+        per_hour = {"done": [0] * 24, "failed": [0] * 24}
+        for r in db.execute("SELECT status, finished_at FROM jobs WHERE status IN ('done','failed') "
+                            "AND finished_at >= ?", (base,)):
+            per_hour[r["status"]][min(23, int((r["finished_at"] - base) // hour))] += 1
+        cost_days = [dict(r) for r in db.execute(
+            "SELECT date(at, 'unixepoch', 'localtime') AS day, COALESCE(SUM(cost_usd), 0) AS cost, COUNT(*) AS runs, "
+            "COALESCE(SUM(duration_s), 0) AS run_s FROM usage WHERE at >= ? GROUP BY day ORDER BY day", (t - 7 * 86400,))]
+        sources = [dict(r) for r in db.execute(
+            "SELECT COALESCE(source, '(none)') AS source, COUNT(*) AS n, MAX(created_at) AS last_at FROM jobs "
+            "WHERE created_at >= ? GROUP BY source ORDER BY n DESC", (t - 86400,))]
+        return {"now": t, "counts": counts, "queues": queues,
+                "oldest_queued_s": round(t - oldest) if oldest else None,
+                "workers": self.workers(), "jobs": jobs, "activity": self.activity(40),
+                "per_hour": {"start": base, **per_hour}, "cost_days": cost_days, "sources": sources,
+                "outbox_pending": db.execute("SELECT COUNT(*) FROM outbox WHERE delivered_at IS NULL "
+                                             "AND attempts < ?", (_OUTBOX_GIVE_UP,)).fetchone()[0],
+                "outbox_stuck": db.execute("SELECT COUNT(*) FROM outbox WHERE delivered_at IS NULL "
+                                           "AND attempts >= ?", (_OUTBOX_GIVE_UP,)).fetchone()[0]}
 
     # ── usage and reports ──────────────────────────────────────────────────────
 

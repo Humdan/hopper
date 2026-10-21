@@ -17,6 +17,9 @@ OPS: dict[str, str] = {
     "stats": "read",
     "usage": "read",
     "report": "read",
+    "workers": "read",
+    "activity": "read",
+    "overview": "read",
     # working
     "claim": "work",
     "heartbeat": "work",

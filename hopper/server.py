@@ -4,6 +4,9 @@ POST /v1/<op>   JSON body = the operation's arguments   -> {"ok": true, "result"
 GET  /v1/jobs[?status=&queue=&limit=]                   -> list
 GET  /v1/jobs/<id>                                      -> show
 GET  /health                                            -> {"ok": true}
+GET  /                                                  -> the web dashboard (no data; asks for a token)
+GET  /v1/overview                                       -> one snapshot of everything the dashboard shows
+GET  /v1/stream                                         -> the same, pushed as server-sent events when it changes
 
 Auth is a bearer token from [tokens] in the config; each token has scopes. The server
 binds 127.0.0.1 unless told otherwise, and refuses to run without tokens on any other
@@ -11,11 +14,13 @@ address.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import threading
 import time
 import urllib.parse
+from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
@@ -41,6 +46,7 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
         raise HopperError("--no-auth is only allowed on localhost")
 
     lock = threading.Lock()  # one SQLite connection; calls are short
+    stop = threading.Event()
 
     def authenticate(header: str):
         if no_auth and not header:
@@ -91,6 +97,8 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
                 args["source"] = name
             try:
                 with lock:
+                    if op in ("claim", "heartbeat"):   # presence: where is this worker connecting from?
+                        hop.note_worker(args["worker"], self.client_address[0])
                     result = getattr(hop, op)(**args)
             except HopperError as exc:
                 return self._send(409, {"ok": False, "error": str(exc)})
@@ -98,10 +106,63 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
                 return self._send(400, {"ok": False, "error": f"bad arguments for {op}: {exc}"})
             self._send(200, {"ok": True, "result": result})
 
+        def _page(self) -> None:
+            try:
+                data = resources.files("hopper").joinpath("ui/index.html").read_bytes()
+            except (FileNotFoundError, OSError):
+                return self._send(404, {"ok": False, "error": "dashboard not installed"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _stream(self) -> None:
+            """Server-sent events: a snapshot now, then another whenever something changes."""
+            who = authenticate(self.headers.get("Authorization", ""))
+            if who is None:
+                return self._send(401, {"ok": False, "error": "missing or wrong bearer token"})
+            if not allowed(who[1], "overview"):
+                return self._send(403, {"ok": False, "error": f"token {who[0]!r} may not read"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            last, quiet_for = None, 0.0
+            try:
+                while not stop.is_set():
+                    with lock:
+                        snap = hop.overview()
+                    body = {k: v for k, v in snap.items() if k not in ("now", "workers")}
+                    body["w"] = [{k: v for k, v in w.items() if k != "seen_ago_s"} for w in snap["workers"]]
+                    digest = hashlib.sha1(json.dumps(body, default=str, sort_keys=True).encode()).hexdigest()
+                    if digest != last or quiet_for >= 5:   # re-send every 5s so ages and clocks stay true
+                        self.wfile.write(b"event: overview\ndata: " + json.dumps(snap, default=str).encode() + b"\n\n")
+                        self.wfile.flush()
+                        last, quiet_for = digest, 0.0
+                    stop.wait(1.0)
+                    quiet_for += 1.0
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
         def do_GET(self):
             url = urllib.parse.urlparse(self.path)
             if url.path == "/health":
                 return self._send(200, {"ok": True, "version": __version__})
+            if url.path in ("/", "/ui", "/index.html"):
+                return self._page()
+            if url.path == "/v1/stream":
+                return self._stream()
+            if url.path == "/v1/overview":
+                return self._call("overview", {})
+            if url.path == "/v1/workers":
+                return self._call("workers", {})
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
             if url.path == "/v1/jobs":
                 args = {k: q[k] for k in ("status", "queue", "tags", "source") if k in q}
@@ -130,8 +191,6 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
-    stop = threading.Event()
-
     def housekeeping():
         while not stop.wait(housekeeping_s):
             try:

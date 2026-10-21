@@ -111,6 +111,22 @@ The full model is in [docs/design.md](docs/design.md).
 Set `HOPPER_URL` and `HOPPER_TOKEN` and the CLI, MCP server and workers talk to a remote
 `hop serve` instead of a local file, so many machines can share one queue.
 
+## Dashboard
+
+`hop serve` also serves a live web dashboard at `/`. Open it, paste an API token (a `read` token is
+enough to watch; `produce`/`admin` unlock adding, bumping, cancelling, retrying and answering), and you get:
+
+- **Connected workers**: every worker that has claimed, with online / busy / away / offline status, its
+  queues and capabilities, the address it connects from, what it is running right now, and its done/failed counts.
+- **A real-time job queue**: pushed over server-sent events, so a job appears the moment it is added and moves
+  as it is claimed, progresses and finishes. Filter by status, queue, or free text; click a job for its
+  instructions, result and evidence, conversation, child jobs, per-run cost and full timeline.
+- **Live activity**, per-queue status bars, 24-hour throughput, 7-day spend, and who is adding work.
+
+The page itself carries no data and no secrets: everything comes over the API with your bearer token, which
+the browser keeps in local storage. The same snapshot is available as `GET /v1/overview` (and the stream
+as `GET /v1/stream`) for your own tooling.
+
 ## Chat apps, media and the relay
 
 Optional, off unless configured ([docs/channels.md](docs/channels.md)):
