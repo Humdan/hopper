@@ -9,7 +9,7 @@ import socket
 import sys
 import time
 
-from . import __version__
+from . import __version__, theme
 from .client import connect
 from .cluster import INSTALL_CMD
 from .prompt import render
@@ -206,9 +206,9 @@ def _parse_child(spec: str) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hop", description="Hopper: a durable priority job queue for AI agents.")
-    p.add_argument("--version", action="version", version=f"hopper {__version__}")
+    p.add_argument("--version", action="version", version=f"{theme.heading('hopper')} {__version__}")
     p.add_argument("--db", help="database file (default: config, $HOPPER_DB, or ~/.local/share/hopper)")
-    sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+    sub = p.add_subparsers(dest="cmd", metavar="command")
 
     def cmd(name, help_, **kw):
         sp = sub.add_parser(name, help=help_, description=help_, **kw)
@@ -412,26 +412,28 @@ def main(argv=None) -> int:
     try:
         return _run(args)
     except HopperError as exc:
-        print(f"hop: {exc}", file=sys.stderr)
+        print(f"{theme.paint('hop:', bold=True, stream=sys.stderr)} {exc}", file=sys.stderr)
         return 1
     except BrokenPipeError:
         return 0
 
 
-_SETUP_GUIDE = f"""A cluster is the group of devices that share one Hopper queue. It has exactly one
+def _setup_guide() -> str:
+    h, c, d = theme.heading, theme.cmd, theme.dim
+    return f"""A cluster is the group of devices that share one Hopper queue. It has exactly one
 mainframe (holds the queue and the dashboard) and any number of clients. One device can be both.
 
-  First device (the mainframe):
-    hop setup mainframe --host <an address your other devices can reach> --service
-    (that's usually a LAN or VPN address such as a Tailscale IP, not 127.0.0.1)
+  {h("first device, the mainframe")}
+    {c("hop setup mainframe --host <an address your other devices can reach> --service")}
+    {d("usually a LAN or VPN address such as a Tailscale IP, not 127.0.0.1")}
 
-  Every other device (a client):
-    on the mainframe:   hop invite <name>          prints a join code
-    on the new device:  {INSTALL_CMD}
-                        hop setup client --join <code>
+  {h("every other device, a client")}
+    on the mainframe:   {c("hop invite <name>")}            {d("prints a join code")}
+    on the new device:  {c(INSTALL_CMD)}
+                        {c("hop setup client --join <code>")}
 
-  Check any device with `hop setup status`; undo a client with `hop setup client --leave`.
-  Just one machine? You don't need any of this: `hop init` is enough.
+  {d("check any device with `hop setup status`; undo a client with `hop setup client --leave`.")}
+  {d("just one machine? you don't need any of this: `hop init` is enough.")}
 """
 
 
@@ -440,23 +442,31 @@ def _cluster_cmd(a) -> int:
     if a.cmd == "invite":
         scopes = tuple(x for x in a.scopes.split(",") if x)
         code = mainframe.invite(a.device, scopes, allow_local=a.local)
-        print(f"Join code for {a.device} (it holds a secret: send it privately, use it once).\n\n"
-              f"On {a.device}:\n"
-              f"  1. install Hopper (needs Python 3.11+):   {cluster.INSTALL_CMD}\n"
-              f"  2. join this cluster:                     hop setup client --join {code}\n"
-              "  3. start a new Claude Code session; it appears on the dashboard within seconds.")
+        h, d = theme.heading, theme.dim
+        print(f"\n{theme.ok('join code ready for ' + h(a.device))}  {d('it holds a secret: send it privately, use it once')}\n")
+        print("  " + h("on " + a.device))
+        for line in theme.columns([("1. install Hopper (needs Python 3.11+)", cluster.INSTALL_CMD),
+                                   ("2. join this cluster", "hop setup client --join " + code),
+                                   ("3. start a new Claude Code session", "it appears on the dashboard within seconds")],
+                                  indent=4, bold_right=(0, 1)):
+            print(line)
+        print()
         return 0
     if a.role == "mainframe":
         r = mainframe.setup(a.cluster, a.host, a.port, a.advertise, a.service)
         if not r["created"]:
-            print(f"already the mainframe of cluster {r['cluster']!r} at {r['url']}")
+            print(theme.ok(f"already the mainframe of cluster {theme.heading(repr(r['cluster']))} at {r['url']}"))
             return 0
-        print(f"mainframe of cluster {r['cluster']!r} created, serving at {r['url']}")
-        print(f"dashboard token (shown once, also in {cluster.tokens_path()}): {r['dashboard_token']}")
-        print(f"service: {r['service']}" if r["service"] else "start it with: hop serve --host "
-              f"{r['host']} --port {r['port']}   (or re-run setup with --service)")
-        print(f"\nNext:\n  1. open {r['url']}/ in a browser and paste the dashboard token\n"
-              "  2. add each other device with:  hop invite <name>   (e.g. hop invite laptop)")
+        h, c, d = theme.heading, theme.cmd, theme.dim
+        print()
+        print(theme.banner(__version__, tagline=f"mainframe of cluster {r['cluster']!r}"))
+        print(f"\n{theme.ok('mainframe created, serving at ' + h(r['url']))}")
+        print(theme.ok(f"dashboard token {h(r['dashboard_token'])}  {d('shown once; also in ' + cluster.tokens_path())}"))
+        print(theme.ok(f"service installed {d(r['service'])}") if r["service"] else
+              f"  {d('start it with')} {c('hop serve --host ' + r['host'] + ' --port ' + str(r['port']))} "
+              f"{d('or re-run setup with --service')}")
+        print(f"\n  {h('next')}\n    1. open {h(r['url'] + '/')} in a browser and paste the dashboard token\n"
+              f"    2. add each other device: {c('hop invite <name>')}  {d('e.g. hop invite laptop')}\n")
         return 0
     if a.role == "client":
         if a.leave:
@@ -465,16 +475,24 @@ def _cluster_cmd(a) -> int:
         if not a.join:
             raise HopperError("give the join code: hop setup client --join CODE")
         r = client.join(a.join, agents=not a.no_agents)
-        print(f"joined cluster {r['cluster']!r} at {r['url']} as {r['name']!r}")
-        print(f"claude hooks: {r['hooks']}" if r["hooks"] else "claude hooks: not installed")
+        h, d = theme.heading, theme.dim
+        print()
+        print(theme.banner(__version__, tagline=f"client of cluster {r['cluster']!r}"))
+        print(f"\n{theme.ok('joined ' + h(repr(r['cluster'])) + ' at ' + r['url'] + ' as ' + h(repr(r['name'])))}")
+        print(theme.ok(f"claude hooks installed {d(r['hooks'])}") if r["hooks"] else
+              f"  {d('claude hooks not installed (--no-agents)')}")
+        print(f"\n  {h('next')}  start a new Claude Code session and send a prompt: this device appears on the dashboard.\n")
         return 0
     role = cluster.load_role()
     if a.role is None:
-        print(_SETUP_GUIDE)
+        print()
+        print(theme.banner(__version__, mini=True))
+        print()
+        print(_setup_guide())
         if role:
-            print("This device right now:")
+            print(theme.heading("this device right now"))
     if not role and a.role == "status":
-        print("this device is not part of a cluster yet.\n\n" + _SETUP_GUIDE)
+        print("this device is not part of a cluster yet.\n\n" + _setup_guide())
     if role.get("mainframe"):
         m = role["mainframe"]
         print(f"mainframe of cluster {m['cluster']!r} at {m['url']}")
@@ -484,7 +502,23 @@ def _cluster_cmd(a) -> int:
     return 0
 
 
+def _home() -> int:
+    """`hop` on its own: the rabbit and the handful of commands worth knowing."""
+    print()
+    print(theme.banner(__version__))
+    print()
+    print("  " + theme.heading("get started"))
+    for line in theme.columns([("hop setup", "make this device a mainframe or a client"),
+                               ('hop add "title"', "queue a job"), ("hop ls", "see the queue"),
+                               ("hop done <id>", "finish a job you claimed")], indent=4):
+        print(line)
+    print("\n  " + theme.dim("hop --help lists every command; hop <command> -h explains one."))
+    return 0
+
+
 def _run(a) -> int:
+    if a.cmd is None:
+        return _home()
     if a.cmd == "mcp":
         from .mcp import run
         run()
@@ -506,8 +540,8 @@ def _run(a) -> int:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as fh:
                 fh.write(SAMPLE_CONFIG)
-            print(f"wrote sample config {path}")
-        print(f"database ready: {hop.db_path}")
+            print(theme.ok(f"wrote sample config {theme.dim(path)}"))
+        print(theme.ok(f"database ready {theme.dim(hop.db_path)}"))
         return 0
 
     if a.cmd == "add":

@@ -79,6 +79,10 @@ hop split j_01J... --child "Collect logs :: ..." --child "Analyze :: ..."
 
 `hop <command> --help` documents every option.
 
+The CLI wears the Hopper yellow (`#FFD60A`) and the rabbit. Colors follow the usual conventions: set `NO_COLOR=1`
+to turn them off, `FORCE_COLOR=1` to keep them when piping; they use truecolor where the terminal supports it and fall
+back to 256 and 16 colors. The rabbit is drawn in braille characters, so it needs a UTF-8 terminal.
+
 ## Time and cost
 
 Every job belongs to a **project**: `-P/--project`, or by default `$HOPPER_PROJECT` or the
