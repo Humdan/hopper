@@ -351,6 +351,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = cmd("retry", "give a failed or cancelled job a fresh start")
     sp.add_argument("job_id")
 
+    sp = cmd("workers", "who can run jobs: machine, queues and capabilities")
+    sp.add_argument("--json", action="store_true")
+
     sp = cmd("stats", "queue counts and health")
     sp.add_argument("--json", action="store_true")
 
@@ -600,6 +603,8 @@ def _run(a) -> int:
         else:
             note = " (already queued; key matched)" if job.get("deduplicated") else ""
             print(f"{job['id']}{note}")
+            for w in job.get("warnings", []):
+                print(f"warning: {w}", file=sys.stderr)
         return 0
 
     if a.cmd == "ls":
@@ -678,6 +683,18 @@ def _run(a) -> int:
         print(_row(job))
         for c in job.get("children") or []:
             print(f"  {STATUS_MARK.get(c['status'], '?')} {c['id']} {c['title']}")
+        return 0
+
+    if a.cmd == "workers":
+        ws = [w for w in hop.workers() if w.get("kind") != "session"]
+        if a.json:
+            _dump(ws)
+            return 0
+        if not ws:
+            print("no workers have connected yet")
+        for w in ws:
+            print(f"{w['status']:8} {w['machine']:10} {w['name']:24} queues {','.join(w['queues']) or '-'}"
+                  f"  caps {','.join(w['caps']) or '-'}")
         return 0
 
     if a.cmd == "stats":

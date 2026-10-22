@@ -355,7 +355,8 @@ function renderJobs() {
       h("td", {class: "prio" + (j.priority >= 75 ? " hi" : "")}, j.priority),
       h("td", {}, h("span", {class: "chip"}, j.queue)),
       h("td", {}, h("div", {class: "title", title: j.title}, j.title),
-        h("div", {class: "sub"}, [j.project, j.source ? "from " + j.source : null, j.progress || j.summary].filter(Boolean).join(" · "))),
+        h("div", {class: "sub"}, [j.project, j.source ? "from " + j.source : null, j.progress || j.summary].filter(Boolean).join(" · ")),
+        (snap.unserved || {})[j.id] ? h("div", {class: "sub", style: "color:var(--fail)", title: snap.unserved[j.id]}, "⚠ nobody can take this: " + snap.unserved[j.id]) : null),
       h("td", {class: "sub"}, j.lease_owner || ""),
       h("td", {class: "sub age", style: "white-space:nowrap", "data-kind": kind, "data-ts": ts}, ageText(kind, ts)),
       h("td", {class: "sub"}, j.attempts + "/" + j.max_attempts));

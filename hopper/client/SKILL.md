@@ -20,6 +20,14 @@ hop add "Short title of the job" \
   #           -P <project> (defaults to the git repo you're in; used by `hop report`)
 ```
 
+**Routing: say what the job needs, not which machine does it.** Run `hop workers` (or
+`hop_workers`) first to see who is alive, which queues they serve and what they can do. Then
+put the job on queue `auto` with `-r <capability>` (for example `-r leds`), and any live worker
+that has every capability you list can take it. Do not name a machine's tools or paths in the
+brief (say "set the strip orange", not "run ledctl"); the worker knows its own tools. If `hop add`
+prints a `warning:` that nobody can take the job, fix the queue or `requires`, or tell the
+user. Do not leave it sitting.
+
 Write the job so a fresh agent with no context can finish it: say what, where, and how to
 verify. Give recurring or retryable work a `--key` so re-adding it never creates a duplicate.
 

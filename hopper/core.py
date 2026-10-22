@@ -368,12 +368,17 @@ class Hopper:
             meta = {**(meta or {}), "type": type, "input": input or {}}
             requires = sorted(set(_list(requires)) | {f"media.{type}"})
         with self._tx() as db:
-            return self._insert(db, title, body, queue=queue, priority=priority,
-                                requires=requires, tags=tags, source=source, reply_to=reply_to,
-                                key=key, parent_id=parent_id, depends_on=depends_on,
-                                not_before=not_before, max_attempts=max_attempts,
-                                timeout=timeout, done_when=done_when, meta=meta, actor=actor,
-                                project=project)
+            job = self._insert(db, title, body, queue=queue, priority=priority,
+                               requires=requires, tags=tags, source=source, reply_to=reply_to,
+                               key=key, parent_id=parent_id, depends_on=depends_on,
+                               not_before=not_before, max_attempts=max_attempts,
+                               timeout=timeout, done_when=done_when, meta=meta, actor=actor,
+                               project=project)
+        if not job.get("deduplicated"):
+            why = self.unserved(job["queue"], job["requires"])
+            if why:
+                job["warnings"] = [why]
+        return job
 
     def _insert(self, db, title: str, body: str = "", *, queue: str = "default", priority=None,
                 requires=None, tags=None, source=None, reply_to=None, key=None,
@@ -707,6 +712,34 @@ class Hopper:
             (_OUTBOX_GIVE_UP,)).fetchone()[0]
         return out
 
+    # ── routing: who could take a job ─────────────────────────────────────────
+
+    def serving(self, queue: str, requires=None, *, _workers=None) -> list[str]:
+        """Names of queue workers that are alive and could claim a job on `queue` needing `requires`."""
+        need = set(_list(requires))
+        return [w["name"] for w in (_workers if _workers is not None else self.workers())
+                if w.get("kind") != "session" and w["status"] != "offline"
+                and queue in w["queues"] and need <= set(w["caps"])]
+
+    def unserved(self, queue: str, requires=None, *, _workers=None) -> str | None:
+        """Why no live worker can take this job, or None when one can."""
+        ws = _workers if _workers is not None else self.workers()
+        if self.serving(queue, requires, _workers=ws):
+            return None
+        live = [w for w in ws if w.get("kind") != "session" and w["status"] != "offline"]
+        need = _list(requires)
+        on_queue = [w for w in live if queue in w["queues"]]
+        if on_queue:
+            return (f"no live worker on queue {queue!r} has {', '.join(need)}; "
+                    f"its workers offer: {', '.join(sorted({c for w in on_queue for c in w['caps']})) or 'nothing'}")
+        hint = ""
+        if need:
+            able = sorted({q for w in live if set(need) <= set(w["caps"]) for q in w["queues"]})
+            if able:
+                hint = f"; workers with {', '.join(need)} serve: {', '.join(able)}"
+        return (f"no live worker serves queue {queue!r}{hint}. "
+                f"Use queue 'auto' with requires to let Hopper pick the worker")
+
     # ── live view (the web UI and `hop serve` read these) ──────────────────────
 
     SESSION_BUSY_S, SESSION_AWAY_S, SESSION_OFF_S = 120, 1800, 6 * 3600
@@ -802,9 +835,15 @@ class Hopper:
         sources = [dict(r) for r in db.execute(
             "SELECT COALESCE(source, '(none)') AS source, COUNT(*) AS n, MAX(created_at) AS last_at FROM jobs "
             "WHERE created_at >= ? GROUP BY source ORDER BY n DESC", (t - 86400,))]
+        ws = self.workers()
+        unserved = {}
+        for r in db.execute("SELECT id, queue, requires FROM jobs WHERE status = 'queued'"):
+            why = self.unserved(r["queue"], json.loads(r["requires"]), _workers=ws)
+            if why:
+                unserved[r["id"]] = why
         return {"now": t, "counts": counts, "queues": queues,
                 "oldest_queued_s": round(t - oldest) if oldest else None,
-                "workers": self.workers(), "jobs": jobs, "activity": self.activity(40),
+                "workers": ws, "unserved": unserved, "jobs": jobs, "activity": self.activity(40),
                 "per_hour": {"start": base, **per_hour}, "cost_days": cost_days, "sources": sources,
                 "outbox_pending": db.execute("SELECT COUNT(*) FROM outbox WHERE delivered_at IS NULL "
                                              "AND attempts < ?", (_OUTBOX_GIVE_UP,)).fetchone()[0],

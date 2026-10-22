@@ -134,6 +134,12 @@ TOOLS = [
             "project": _S, "queue": _S}},
     },
     {
+        "name": "hop_workers",
+        "description": "Who can run jobs right now: each queue worker's machine, status, queues and capabilities. "
+                       "Check this before hop_add so you pick a queue and `requires` a live worker really has.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "hop_stats",
         "description": "Queue counts by status, oldest waiting job, and undelivered notices.",
         "inputSchema": {"type": "object", "properties": {}},
@@ -183,6 +189,9 @@ def _call(hop, name: str, args: dict, worker: str):
         return hop.bump(**a)
     if name == "hop_report":
         return hop.report(**a)
+    if name == "hop_workers":
+        return [{k: w[k] for k in ("name", "machine", "status", "queues", "caps", "running", "doing") if k in w}
+                for w in hop.workers() if w.get("kind") != "session"]
     if name == "hop_stats":
         return hop.stats()
     raise HopperError(f"unknown tool {name}")
