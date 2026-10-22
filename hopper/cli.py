@@ -269,6 +269,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--progress", help="a note on where you are")
     sp.add_argument("--extend", help="lease length from now (default: the job's timeout)")
 
+    sp = cmd("ping", "show up as present (and say what you're on) without claiming a job")
+    worker_arg(sp)
+    sp.add_argument("doing", nargs="?", help="one line: what you're working on now")
+    sp.add_argument("--kind", default="session", help="session (default) or worker")
+    sp.add_argument("--pulse", action="store_true", help="also post it to the live activity feed")
+    sp.add_argument("--end", action="store_true", help="leave: remove this entry")
+
     sp = cmd("done", "complete your job")
     sp.add_argument("job_id")
     worker_arg(sp)
@@ -474,6 +481,7 @@ def _run(a) -> int:
     simple = {
         "heartbeat": lambda: hop.heartbeat(job_id=a.job_id, worker=worker, extend=a.extend,
                                            progress=a.progress),
+        "ping": lambda: hop.ping(worker=worker, doing=a.doing, kind=a.kind, pulse=a.pulse, end=a.end),
         "done": lambda: hop.complete(job_id=a.job_id, worker=worker, summary=_read_text(a.summary),
                                      evidence=_read_text(a.evidence), artifacts=a.artifact,
                                      usage=_done_usage(a)),

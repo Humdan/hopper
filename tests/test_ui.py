@@ -135,3 +135,30 @@ class Web(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Sessions(unittest.TestCase):
+    def setUp(self):
+        self.hop = Hopper(db=":memory:", config=Config(db=":memory:"))
+
+    def test_ping_registers_a_session_with_what_it_is_doing(self):
+        self.hop.ping("mac/claude:hopper", doing="editing core.py", pulse=True)
+        (w,) = self.hop.workers()
+        self.assertEqual((w["kind"], w["doing"], w["status"]), ("session", "editing core.py", "busy"))
+        self.hop.ping("mac/claude:hopper", doing="idle")
+        self.assertEqual(self.hop.workers()[0]["status"], "online")
+        self.assertEqual(self.hop.activity()[0]["kind"], "pulse")
+
+    def test_session_ages_out_and_can_leave(self):
+        self.hop.ping("s", doing="x")
+        self.hop._db.execute("UPDATE workers SET last_seen = last_seen - 4000")
+        self.assertEqual(self.hop.workers()[0]["status"], "away")
+        self.hop.ping("s", end=True)
+        self.assertEqual(self.hop.workers(), [])
+
+    def test_pulses_are_trimmed(self):
+        self.hop.PULSE_KEEP = 5
+        for i in range(12):
+            self.hop.ping("s", doing=f"step {i}", pulse=True)
+        n = self.hop._db.execute("SELECT COUNT(*) FROM pulses").fetchone()[0]
+        self.assertEqual(n, 5)

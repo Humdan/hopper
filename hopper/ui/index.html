@@ -90,7 +90,7 @@ tbody tr:last-child td{border-bottom:0}
 .ev>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .ev .t{color:var(--muted);font-size:11px;white-space:nowrap;min-width:46px;padding-top:2px}
 .ev .k{font-weight:600}
-.ev.k-completed .k{color:var(--done)}.ev.k-failed .k,.ev.k-lease_expired .k{color:var(--fail)}.ev.k-claimed .k{color:var(--run)}.ev.k-asked .k{color:var(--ask)}
+.ev.k-pulse{opacity:.85}.ev.k-completed .k{color:var(--done)}.ev.k-failed .k,.ev.k-lease_expired .k{color:var(--fail)}.ev.k-claimed .k{color:var(--run)}.ev.k-asked .k{color:var(--ask)}
 .qrow{display:grid;grid-template-columns:90px 1fr auto;gap:10px;align-items:center;padding:6px 16px;font-size:13px}
 .bar{display:flex;height:9px;border-radius:5px;overflow:hidden;background:var(--panel2)}
 .bar i{display:block;height:100%}
@@ -297,15 +297,16 @@ function renderWorkers() {
   $("#wCount").textContent = snap.workers.length;
   if (!snap.workers.length) return clear($("#workers"), h("div", {class: "empty"}, "No worker has connected yet. Start one with ", h("span", {class: "mono"}, "hop work --exec …")));
   const order = {busy: 0, online: 1, away: 2, offline: 3};
-  const ws = [...snap.workers].sort((a, b) => order[a.status] - order[b.status] || b.last_seen - a.last_seen);
+  const ws = [...snap.workers].sort((a, b) => order[a.status] - order[b.status] || a.name.localeCompare(b.name));
   clear($("#workers"), h("div", {class: "workers"}, ws.map(w => h("div", {class: "worker"},
     h("div", {class: "top"}, h("span", {class: "dot " + (w.status === "online" ? "on" : w.status)}), h("span", {class: "name", title: w.name}, w.name), h("span", {class: "sp"}),
-      h("span", {class: "sub"}, w.status === "busy" ? "busy" : w.status === "online" ? "idle" : w.status)),
+      h("span", {class: "sub"}, (w.kind === "session" ? "session · " : "") + (w.status === "busy" ? "busy" : w.status === "online" ? "idle" : w.status))),
+    w.kind === "session" && w.doing ? h("div", {class: "now"}, w.doing, h("span", {class: "sub"}, " · " + ago(nowS() - (w.doing_at || w.last_seen)))) : null,
     w.running.length ? w.running.map(r => h("div", {class: "now", onclick: () => openDrawer(r.id)}, r.title, h("span", {class: "sub"}, " · " + r.queue + " · " + dur(nowS() - (r.started_at || nowS()))))) : null,
     h("div", {class: "chips"}, w.queues.map(q => h("span", {class: "chip"}, "queue " + q)), w.caps.map(x => h("span", {class: "chip"}, x))),
     h("div", {class: "meta"}, h("span", {}, "seen " + ago(nowS() - w.last_seen) + (w.status === "online" || w.status === "busy" ? "" : " ago")),
       w.addr ? h("span", {class: "mono"}, w.addr) : null,
-      h("span", {}, w.jobs_done + " done"), w.jobs_failed ? h("span", {style: "color:var(--fail)"}, w.jobs_failed + " failed") : null)))));
+      w.kind === "session" ? null : h("span", {}, w.jobs_done + " done"), w.jobs_failed ? h("span", {style: "color:var(--fail)"}, w.jobs_failed + " failed") : null)))));
 }
 const TABS = [["open", "Open"], ["running", "Running"], ["needs_input", "Needs input"], ["queued", "Queued"], ["waiting", "Waiting"], ["done", "Done"], ["failed", "Failed"], ["cancelled", "Cancelled"], ["all", "All"]];
 function matchTab(j) { return tab === "all" ? true : tab === "open" ? ["running", "needs_input", "queued", "waiting"].includes(j.status) : j.status === tab; }
@@ -345,9 +346,9 @@ function renderJobs() {
 }
 function renderFeed() {
   const words = {added: "added", claimed: "started", completed: "finished", failed: "failed", progress: "progress", asked: "asked a question", answered: "answered", lease_expired: "lease expired", retry_scheduled: "will retry", released: "released", cancelled: "cancelled", bumped: "re-prioritised", retried: "retried"};
-  clear($("#feed"), snap.activity.length ? snap.activity.map(e => h("div", {class: "ev k-" + e.kind, onclick: () => openDrawer(e.job_id)},
+  clear($("#feed"), snap.activity.length ? snap.activity.map(e => h("div", {class: "ev k-" + e.kind, onclick: e.job_id ? () => openDrawer(e.job_id) : null},
     h("span", {class: "t"}, clock(e.at)),
-    h("span", {}, h("span", {class: "k"}, words[e.kind] || e.kind), " ", e.title || e.job_id, h("div", {class: "sub"}, [e.actor, e.text].filter(Boolean).join(" · "))))) : h("div", {class: "empty"}, "Nothing has happened yet."));
+    h("span", {}, e.kind === "pulse" ? null : h("span", {class: "k"}, words[e.kind] || e.kind), e.kind === "pulse" ? null : " ", e.title || e.job_id, h("div", {class: "sub"}, [e.actor, e.text].filter(Boolean).join(" · "))))) : h("div", {class: "empty"}, "Nothing has happened yet."));
 }
 function renderQueues() {
   const names = Object.keys(snap.queues).sort();

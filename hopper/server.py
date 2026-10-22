@@ -97,7 +97,9 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
                 args["source"] = name
             try:
                 with lock:
-                    if op in ("claim", "heartbeat"):   # presence: where is this worker connecting from?
+                    if op == "ping":
+                        args["addr"] = self.client_address[0]
+                    elif op in ("claim", "heartbeat"):   # presence: where is this worker connecting from?
                         hop.note_worker(args["worker"], self.client_address[0])
                     result = getattr(hop, op)(**args)
             except HopperError as exc:

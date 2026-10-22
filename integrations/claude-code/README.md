@@ -36,3 +36,20 @@ extra flags. `--reserve 1` keeps one slot free for `high`/`urgent` jobs.
 
 Choose the tool permissions deliberately: headless runs can't ask you to approve anything, so
 list what the worker may use. It needs at least `Bash(hop:*)` to report back.
+
+## 4. Show your sessions on the dashboard (presence)
+
+Interactive sessions never claim a job, so by default they are invisible. `hop-pulse` is a hook
+that reports each session (and what it is doing now) to Hopper:
+
+```sh
+cp integrations/claude-code/hop-pulse ~/.local/bin/
+printf 'HOPPER_URL=https://queue.example.com\nHOPPER_TOKEN=...\n' > ~/.config/hopper/pulse.env
+```
+
+Then register it in `~/.claude/settings.json` for `SessionStart`, `UserPromptSubmit`,
+`PostToolUse` (matcher `*`), `Stop` and `SessionEnd`, each as
+`{"type": "command", "command": "~/.local/bin/hop-pulse", "timeout": 5}`. A `work` token is enough.
+Sessions appear under "Connected workers" with their current action, and prompts show in Live
+activity. The hook is silent on failure and throttles tool pings to one per 20 s. Any script can do the
+same with `hop ping "what I'm on" --pulse` (or `POST /v1/ping`).

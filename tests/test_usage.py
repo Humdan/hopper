@@ -174,7 +174,7 @@ class Migration(unittest.TestCase):
             try:
                 self.assertIsNone(h.show("j_old")["project"])
                 self.assertEqual(h.add("new", project="p")["project"], "p")
-                self.assertEqual(h._db.execute("SELECT v FROM meta WHERE k='schema'").fetchone()[0], "3")
+                self.assertEqual(h._db.execute("SELECT v FROM meta WHERE k='schema'").fetchone()[0], "4")
             finally:
                 h.close()
 

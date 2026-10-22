@@ -16,7 +16,7 @@ from .config import Config, load as load_config
 from .util import (ALL_STATES, OPEN_STATES, TERMINAL_STATES, HopperError, new_id, now,
                    parse_duration, parse_priority, parse_since, parse_when)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -119,6 +119,14 @@ CREATE TABLE IF NOT EXISTS workers (
   jobs_failed  INTEGER NOT NULL DEFAULT 0
 );
 
+-- Pulses: what sessions and other non-queue agents report doing (ping), newest kept, oldest trimmed.
+CREATE TABLE IF NOT EXISTS pulses (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  at     REAL NOT NULL,
+  worker TEXT NOT NULL,
+  text   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -173,6 +181,11 @@ class Hopper:
         if "project" not in cols:   # v1 -> v2
             self._db.execute("ALTER TABLE jobs ADD COLUMN project TEXT")
         self._db.execute("CREATE INDEX IF NOT EXISTS jobs_project ON jobs(project)")
+        wcols = {r[1] for r in self._db.execute("PRAGMA table_info(workers)")}
+        if "kind" not in wcols:   # v3 -> v4: sessions that ping instead of claiming
+            self._db.execute("ALTER TABLE workers ADD COLUMN kind TEXT NOT NULL DEFAULT 'worker'")
+            self._db.execute("ALTER TABLE workers ADD COLUMN doing TEXT")
+            self._db.execute("ALTER TABLE workers ADD COLUMN doing_at REAL")
         self._db.execute("UPDATE meta SET v = ? WHERE k = 'schema' AND CAST(v AS INTEGER) < ?",
                          (str(SCHEMA_VERSION), SCHEMA_VERSION))
 
@@ -239,6 +252,30 @@ class Hopper:
         """Remember where a worker connects from (called by `hop serve`)."""
         with self._tx() as db:
             self._seen(db, worker, addr=addr)
+
+    PULSE_KEEP = 300
+
+    def ping(self, worker: str, doing: str | None = None, kind: str = "session", caps=None, queues=None,
+             addr: str | None = None, pulse: bool = False, end: bool = False) -> dict:
+        """Presence for agents that never claim a job: an interactive session, a kanban task, a script.
+
+        `doing` is the one-line "what I'm on now"; `pulse` also writes it to the live activity feed;
+        `end` removes the entry (the session closed)."""
+        if not worker:
+            raise HopperError("ping needs a worker name")
+        doing = (str(doing).strip()[:200] or None) if doing is not None else None
+        with self._tx() as db:
+            if end:
+                db.execute("DELETE FROM workers WHERE name = ?", (worker,))
+                return {"worker": worker, "ended": True}
+            self._seen(db, worker, caps=caps, queues=queues, addr=addr)
+            db.execute("UPDATE workers SET kind = ?, doing = COALESCE(?, doing), "
+                       "doing_at = CASE WHEN ? IS NULL THEN doing_at ELSE ? END WHERE name = ?",
+                       (str(kind)[:20], doing, doing, now(), worker))
+            if pulse and doing:
+                db.execute("INSERT INTO pulses(at, worker, text) VALUES (?,?,?)", (now(), worker, doing))
+                db.execute("DELETE FROM pulses WHERE id <= (SELECT MAX(id) FROM pulses) - ?", (self.PULSE_KEEP,))
+        return {"worker": worker, "seen": True}
 
     def _notify(self, db, job: dict, event: str, text: str | None = None,
                 artifacts=None) -> None:
@@ -671,6 +708,7 @@ class Hopper:
 
     # ── live view (the web UI and `hop serve` read these) ──────────────────────
 
+    SESSION_BUSY_S, SESSION_AWAY_S, SESSION_OFF_S = 120, 1800, 6 * 3600
     ONLINE_S, AWAY_S = 60, 900   # seen within a minute = online; within 15 min = away
 
     def workers(self) -> list[dict]:
@@ -688,14 +726,19 @@ class Hopper:
             age = t - w["last_seen"]
             jobs = busy.get(w["name"], [])
             w["running"] = jobs
-            w["status"] = ("busy" if jobs and age < self.AWAY_S else
-                           "online" if age < self.ONLINE_S else "away" if age < self.AWAY_S else "offline")
+            if w.get("kind") == "session":   # pinged on activity, so it stays "online" while idle in a terminal
+                working = bool(w.get("doing")) and w["doing"] != "idle" and age < self.SESSION_BUSY_S
+                w["status"] = ("busy" if working else "online" if age < self.SESSION_AWAY_S
+                               else "away" if age < self.SESSION_OFF_S else "offline")
+            else:
+                w["status"] = ("busy" if jobs and age < self.AWAY_S else
+                               "online" if age < self.ONLINE_S else "away" if age < self.AWAY_S else "offline")
             w["seen_ago_s"] = round(age, 1)
             out.append(w)
         return out
 
     def activity(self, limit: int = 40, since_id: int = 0) -> list[dict]:
-        """The newest events across all jobs, newest first, each with its job's title."""
+        """The newest events across all jobs, plus session pulses, newest first."""
         rows = self._db.execute(
             "SELECT e.id, e.at, e.kind, e.actor, e.data, e.job_id, j.title, j.queue FROM events e "
             "LEFT JOIN jobs j ON j.id = e.job_id WHERE e.id > ? ORDER BY e.id DESC LIMIT ?",
@@ -706,6 +749,11 @@ class Hopper:
             out.append({"id": r["id"], "at": r["at"], "kind": r["kind"], "actor": r["actor"],
                         "job_id": r["job_id"], "title": r["title"], "queue": r["queue"],
                         "text": d.get("text") or d.get("reason")})
+        if not since_id:
+            out += [{"id": f"p{r['id']}", "at": r["at"], "kind": "pulse", "actor": r["worker"], "job_id": None,
+                     "title": r["text"], "queue": None, "text": None}
+                    for r in self._db.execute("SELECT * FROM pulses ORDER BY id DESC LIMIT ?", (int(limit),))]
+            out = sorted(out, key=lambda e: e["at"], reverse=True)[:int(limit)]
         return out
 
     def overview(self, finished: int = 100, open_limit: int = 300) -> dict:
