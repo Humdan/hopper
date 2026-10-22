@@ -43,11 +43,11 @@ Interactive sessions never claim a job, so by default they are invisible. `hop-p
 that reports each session (and what it is doing now) to Hopper:
 
 ```sh
-cp integrations/claude-code/hop-pulse ~/.local/bin/
-printf 'HOPPER_URL=https://queue.example.com\nHOPPER_TOKEN=...\n' > ~/.config/hopper/pulse.env
+HOPPER_URL=https://queue.example.com HOPPER_TOKEN=... sh integrations/claude-code/install-hop-pulse.sh
 ```
 
-Then register it in `~/.claude/settings.json` for `SessionStart`, `UserPromptSubmit`,
+That installs the hook, writes `~/.config/hopper/pulse.env` (mode 600) and registers it. To do it by hand,
+copy `hop-pulse` to `~/.local/bin/`, write `pulse.env` with those two variables, then register it in `~/.claude/settings.json` for `SessionStart`, `UserPromptSubmit`,
 `PostToolUse` (matcher `*`), `Stop` and `SessionEnd`, each as
 `{"type": "command", "command": "~/.local/bin/hop-pulse", "timeout": 5}`. A `work` token is enough.
 Sessions appear under "Connected workers" with their current action, and prompts show in Live
