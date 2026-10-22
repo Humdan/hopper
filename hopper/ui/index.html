@@ -58,6 +58,7 @@ main{max-width:1500px;margin:0 auto;padding:18px 20px 60px;display:grid;gap:16px
 .worker .top{display:flex;align-items:center;gap:8px}
 .worker .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .worker .meta{color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:4px 12px}
+.grp{padding:12px 16px 0}.grp .sub{margin-left:4px}.grp+.workers{padding-top:8px}
 .chips{display:flex;flex-wrap:wrap;gap:4px}
 .chip{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:0 6px;font-size:11px;color:var(--muted)}
 .now{font-size:12px;border-left:3px solid var(--run);padding-left:8px;cursor:pointer}
@@ -136,7 +137,7 @@ dialog input,dialog textarea,dialog select{background:var(--panel2);border:1px s
   <section class="kpis" id="kpis"></section>
   <div class="cols">
     <div class="stack">
-      <section class="card"><h2>Connected workers <span class="c" id="wCount"></span></h2><div id="workers"></div></section>
+      <section class="card"><h2>Who is connected <span class="c" id="wCount"></span><span class="sp"></span><button class="tab" id="oldBtn" style="display:none"></button></h2><div id="workers"></div></section>
       <section class="card">
         <h2>Jobs <span class="c" id="jCount"></span></h2>
         <div class="toolbar">
@@ -293,20 +294,36 @@ function render() {
   $("#ver").textContent = "";
 }
 function pill(st) { return h("span", {class: "pill " + st}, LABEL[st] || st); }
-function renderWorkers() {
-  $("#wCount").textContent = snap.workers.length;
-  if (!snap.workers.length) return clear($("#workers"), h("div", {class: "empty"}, "No worker has connected yet. Start one with ", h("span", {class: "mono"}, "hop work --exec …")));
-  const order = {busy: 0, online: 1, away: 2, offline: 3};
-  const ws = [...snap.workers].sort((a, b) => order[a.status] - order[b.status] || a.name.localeCompare(b.name));
-  clear($("#workers"), h("div", {class: "workers"}, ws.map(w => h("div", {class: "worker"},
-    h("div", {class: "top"}, h("span", {class: "dot " + (w.status === "online" ? "on" : w.status)}), h("span", {class: "name", title: w.name}, w.name), h("span", {class: "sp"}),
-      h("span", {class: "sub"}, (w.kind === "session" ? "session · " : "") + (w.status === "busy" ? "busy" : w.status === "online" ? "idle" : w.status))),
-    w.kind === "session" && w.doing ? h("div", {class: "now"}, w.doing, h("span", {class: "sub"}, " · " + ago(nowS() - (w.doing_at || w.last_seen)))) : null,
+let showOld = false;
+const OLD_S = 6 * 3600;   // offline this long = hidden unless "show old" is on
+function workerCard(w) {
+  const isSession = w.kind === "session";
+  return h("div", {class: "worker"},
+    h("div", {class: "top"}, h("span", {class: "dot " + (w.status === "online" ? "on" : w.status)}), h("span", {class: "name", title: w.name}, w.name.startsWith(w.machine + "/") ? w.name.slice(w.machine.length + 1) : w.name), h("span", {class: "sp"}),
+      h("span", {class: "chip"}, w.machine), h("span", {class: "sub"}, w.status === "busy" ? "busy" : w.status === "online" ? "idle" : w.status)),
+    isSession && w.doing ? h("div", {class: "now"}, w.doing, h("span", {class: "sub"}, " · " + ago(nowS() - (w.doing_at || w.last_seen)))) : null,
     w.running.length ? w.running.map(r => h("div", {class: "now", onclick: () => openDrawer(r.id)}, r.title, h("span", {class: "sub"}, " · " + r.queue + " · " + dur(nowS() - (r.started_at || nowS()))))) : null,
-    h("div", {class: "chips"}, w.queues.map(q => h("span", {class: "chip"}, "queue " + q)), w.caps.map(x => h("span", {class: "chip"}, x))),
+    isSession ? null : h("div", {class: "chips"}, w.queues.map(q => h("span", {class: "chip"}, "queue " + q)), w.caps.map(x => h("span", {class: "chip"}, x))),
     h("div", {class: "meta"}, h("span", {}, "seen " + ago(nowS() - w.last_seen) + (w.status === "online" || w.status === "busy" ? "" : " ago")),
-      w.addr ? h("span", {class: "mono"}, w.addr) : null,
-      w.kind === "session" ? null : h("span", {}, w.jobs_done + " done"), w.jobs_failed ? h("span", {style: "color:var(--fail)"}, w.jobs_failed + " failed") : null)))));
+      isSession ? null : h("span", {}, w.jobs_done + " done"), w.jobs_failed ? h("span", {style: "color:var(--fail)"}, w.jobs_failed + " failed") : null));
+}
+function renderWorkers() {
+  const order = {busy: 0, online: 1, away: 2, offline: 3};
+  const old = snap.workers.filter(w => w.status === "offline" && nowS() - w.last_seen > OLD_S);
+  const all = showOld ? snap.workers : snap.workers.filter(w => !old.includes(w));
+  $("#wCount").textContent = all.length;
+  const btn = $("#oldBtn");
+  btn.style.display = old.length ? "" : "none";
+  btn.textContent = (showOld ? "hide " : "show ") + old.length + " old";
+  btn.onclick = () => { showOld = !showOld; renderWorkers(); };
+  if (!all.length) return clear($("#workers"), h("div", {class: "empty"}, "Nobody has connected yet. Start a worker with ", h("span", {class: "mono"}, "hop work --exec …")));
+  const sort = list => [...list].sort((a, b) => order[a.status] - order[b.status] || a.machine.localeCompare(b.machine) || a.name.localeCompare(b.name));
+  const group = (title, caption, list) => list.length ? [
+    h("div", {class: "grp"}, h("b", {}, title), h("span", {class: "sub"}, " " + caption)),
+    h("div", {class: "workers"}, sort(list).map(workerCard))] : [];
+  clear($("#workers"), h("div", {}, [
+    ...group("Sessions", "interactive Claude windows: what each is doing right now", all.filter(w => w.kind === "session")),
+    ...group("Queue workers", "background processes that take jobs off a queue: idle = waiting for work", all.filter(w => w.kind !== "session"))]));
 }
 const TABS = [["open", "Open"], ["running", "Running"], ["needs_input", "Needs input"], ["queued", "Queued"], ["waiting", "Waiting"], ["done", "Done"], ["failed", "Failed"], ["cancelled", "Cancelled"], ["all", "All"]];
 function matchTab(j) { return tab === "all" ? true : tab === "open" ? ["running", "needs_input", "queued", "waiting"].includes(j.status) : j.status === tab; }

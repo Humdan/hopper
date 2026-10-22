@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sqlite3
 from contextlib import contextmanager
 
@@ -724,6 +725,8 @@ class Hopper:
             w = dict(r)
             w["caps"], w["queues"] = json.loads(w["caps"]), json.loads(w["queues"])
             age = t - w["last_seen"]
+            # remote callers are named "<token>/<name>", and the token is the machine; local ones are this host
+            w["machine"] = w["name"].split("/")[0] if w["addr"] else socket.gethostname().split(".")[0].lower()
             jobs = busy.get(w["name"], [])
             w["running"] = jobs
             if w.get("kind") == "session":   # pinged on activity, so it stays "online" while idle in a terminal
