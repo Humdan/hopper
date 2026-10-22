@@ -17,6 +17,7 @@ import tomllib
 from .util import HopperError, expand
 
 CODE_PREFIX = "hop1."
+INSTALL_CMD = "pipx install git+https://github.com/Humdan/hopper"   # or: pip install git+https://github.com/Humdan/hopper
 
 
 def config_dir() -> str:

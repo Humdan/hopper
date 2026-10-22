@@ -11,6 +11,7 @@ import time
 
 from . import __version__
 from .client import connect
+from .cluster import INSTALL_CMD
 from .prompt import render
 from .util import HopperError, ago, default_project, iso, priority_name
 
@@ -219,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = cmd("init", "create the database and a sample config")
 
     sp = cmd("setup", "make this device a mainframe (runs the queue) or a client (uses one)")
-    setup_sub = sp.add_subparsers(dest="role", required=True)
+    setup_sub = sp.add_subparsers(dest="role")
     mf = setup_sub.add_parser("mainframe", help="start a cluster: this device holds the queue and serves the others")
     mf.add_argument("--cluster", default="home", help="a name for the cluster (default: home)")
     mf.add_argument("--host", default="127.0.0.1", help="address to listen on; use one your other devices can reach")
@@ -417,13 +418,33 @@ def main(argv=None) -> int:
         return 0
 
 
+_SETUP_GUIDE = f"""A cluster is the group of devices that share one Hopper queue. It has exactly one
+mainframe (holds the queue and the dashboard) and any number of clients. One device can be both.
+
+  First device (the mainframe):
+    hop setup mainframe --host <an address your other devices can reach> --service
+    (that's usually a LAN or VPN address such as a Tailscale IP, not 127.0.0.1)
+
+  Every other device (a client):
+    on the mainframe:   hop invite <name>          prints a join code
+    on the new device:  {INSTALL_CMD}
+                        hop setup client --join <code>
+
+  Check any device with `hop setup status`; undo a client with `hop setup client --leave`.
+  Just one machine? You don't need any of this: `hop init` is enough.
+"""
+
+
 def _cluster_cmd(a) -> int:
     from . import client, cluster, mainframe
     if a.cmd == "invite":
         scopes = tuple(x for x in a.scopes.split(",") if x)
         code = mainframe.invite(a.device, scopes, allow_local=a.local)
-        print(f"On {a.device}, run:\n\n  hop setup client --join {code}\n\n"
-              "The code holds a secret: send it privately and only once.")
+        print(f"Join code for {a.device} (it holds a secret: send it privately, use it once).\n\n"
+              f"On {a.device}:\n"
+              f"  1. install Hopper (needs Python 3.11+):   {cluster.INSTALL_CMD}\n"
+              f"  2. join this cluster:                     hop setup client --join {code}\n"
+              "  3. start a new Claude Code session; it appears on the dashboard within seconds.")
         return 0
     if a.role == "mainframe":
         r = mainframe.setup(a.cluster, a.host, a.port, a.advertise, a.service)
@@ -434,7 +455,8 @@ def _cluster_cmd(a) -> int:
         print(f"dashboard token (shown once, also in {cluster.tokens_path()}): {r['dashboard_token']}")
         print(f"service: {r['service']}" if r["service"] else "start it with: hop serve --host "
               f"{r['host']} --port {r['port']}   (or re-run setup with --service)")
-        print("add a device with: hop invite <name>")
+        print(f"\nNext:\n  1. open {r['url']}/ in a browser and paste the dashboard token\n"
+              "  2. add each other device with:  hop invite <name>   (e.g. hop invite laptop)")
         return 0
     if a.role == "client":
         if a.leave:
@@ -447,8 +469,12 @@ def _cluster_cmd(a) -> int:
         print(f"claude hooks: {r['hooks']}" if r["hooks"] else "claude hooks: not installed")
         return 0
     role = cluster.load_role()
-    if not role:
-        print("this device is not part of a cluster. `hop setup mainframe` or `hop setup client --join CODE`.")
+    if a.role is None:
+        print(_SETUP_GUIDE)
+        if role:
+            print("This device right now:")
+    if not role and a.role == "status":
+        print("this device is not part of a cluster yet.\n\n" + _SETUP_GUIDE)
     if role.get("mainframe"):
         m = role["mainframe"]
         print(f"mainframe of cluster {m['cluster']!r} at {m['url']}")

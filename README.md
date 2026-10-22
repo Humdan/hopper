@@ -44,8 +44,9 @@ pipx install git+https://github.com/Humdan/hopper      # or: pip install git+htt
 hop init                                               # database + commented sample config
 ```
 
-On one machine that is all you need. To share a queue across devices, pick one to be the **mainframe** and join the
-others as **clients** (a device can be both; a cluster has exactly one mainframe):
+On one machine that is all you need. To share a queue and a dashboard across several devices, install Hopper on each
+one, make one of them the **mainframe** and join the others as **clients** (a device can be both; a cluster has
+exactly one mainframe). Run `hop setup` any time for a short explanation:
 
 ```sh
 hop setup mainframe --cluster home --host <reachable address> --service   # on the mainframe
@@ -53,7 +54,7 @@ hop invite laptop                                                          # pri
 hop setup client --join <code>                                             # on the laptop
 ```
 
-See [docs/cluster.md](docs/cluster.md).
+Step by step, with prerequisites and troubleshooting: [docs/cluster.md](docs/cluster.md).
 
 ## The 60-second tour
 
