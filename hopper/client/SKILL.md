@@ -24,7 +24,7 @@ hop add "Short title of the job" \
 `hop_workers`) first to see who is alive, which queues they serve and what they can do. Then
 put the job on queue `auto` with `-r <capability>` (for example `-r leds`), and any live worker
 that has every capability you list can take it. Do not name a machine's tools or paths in the
-brief (say "set the strip orange", not "run ledctl"); the worker knows its own tools. If `hop add`
+brief (say "set the strip orange", not the name of a tool); the worker knows its own tools. If `hop add`
 prints a `warning:` that nobody can take the job, fix the queue or `requires`, or tell the
 user. Do not leave it sitting.
 
