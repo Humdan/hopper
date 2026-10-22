@@ -29,7 +29,7 @@ Issues = "https://github.com/Humdan/hopper/issues"
 hop = "hopper.cli:main"
 
 [tool.setuptools]
-packages = ["hopper", "hopper.channels", "hopper.ui"]
+packages = ["hopper", "hopper.channels", "hopper.client", "hopper.mainframe", "hopper.ui"]
 
 [tool.setuptools.package-data]
 "hopper.ui" = ["*.html"]

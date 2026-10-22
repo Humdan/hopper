@@ -218,6 +218,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = cmd("init", "create the database and a sample config")
 
+    sp = cmd("setup", "make this device a mainframe (runs the queue) or a client (uses one)")
+    setup_sub = sp.add_subparsers(dest="role", required=True)
+    mf = setup_sub.add_parser("mainframe", help="start a cluster: this device holds the queue and serves the others")
+    mf.add_argument("--cluster", default="home", help="a name for the cluster (default: home)")
+    mf.add_argument("--host", default="127.0.0.1", help="address to listen on; use one your other devices can reach")
+    mf.add_argument("--port", type=int, default=8770)
+    mf.add_argument("--advertise", help="the URL clients should use, if it differs from http://HOST:PORT")
+    mf.add_argument("--service", action="store_true", help="also install and start it as a background service")
+    cl = setup_sub.add_parser("client", help="join a cluster with a join code from `hop invite`")
+    cl.add_argument("--join", metavar="CODE", help="the join code the mainframe printed")
+    cl.add_argument("--leave", action="store_true", help="leave the cluster and remove the hooks")
+    cl.add_argument("--no-agents", action="store_true", help="don't register the Claude Code hooks")
+    setup_sub.add_parser("status", help="show what this device is")
+
+    sp = cmd("invite", "mainframe only: create a join code for another device")
+    sp.add_argument("device", help="a short name for the device, e.g. laptop")
+    sp.add_argument("--scopes", default="work", help="token scopes (default: work)")
+    sp.add_argument("--local", action="store_true", help="allow a loopback address (testing on one machine)")
+
+    sp = cmd("pulse", "the Claude Code hook that reports a session to the dashboard (reads the hook JSON on stdin)")
+
     sp = cmd("add", "queue a job")
     sp.add_argument("title")
     sp.add_argument("-b", "--body", help="instructions ('-' for stdin, @file to read a file)")
@@ -396,11 +417,58 @@ def main(argv=None) -> int:
         return 0
 
 
+def _cluster_cmd(a) -> int:
+    from . import client, cluster, mainframe
+    if a.cmd == "invite":
+        scopes = tuple(x for x in a.scopes.split(",") if x)
+        code = mainframe.invite(a.device, scopes, allow_local=a.local)
+        print(f"On {a.device}, run:\n\n  hop setup client --join {code}\n\n"
+              "The code holds a secret: send it privately and only once.")
+        return 0
+    if a.role == "mainframe":
+        r = mainframe.setup(a.cluster, a.host, a.port, a.advertise, a.service)
+        if not r["created"]:
+            print(f"already the mainframe of cluster {r['cluster']!r} at {r['url']}")
+            return 0
+        print(f"mainframe of cluster {r['cluster']!r} created, serving at {r['url']}")
+        print(f"dashboard token (shown once, also in {cluster.tokens_path()}): {r['dashboard_token']}")
+        print(f"service: {r['service']}" if r["service"] else "start it with: hop serve --host "
+              f"{r['host']} --port {r['port']}   (or re-run setup with --service)")
+        print("add a device with: hop invite <name>")
+        return 0
+    if a.role == "client":
+        if a.leave:
+            print("left the cluster" if client.leave() else "this device isn't a client")
+            return 0
+        if not a.join:
+            raise HopperError("give the join code: hop setup client --join CODE")
+        r = client.join(a.join, agents=not a.no_agents)
+        print(f"joined cluster {r['cluster']!r} at {r['url']} as {r['name']!r}")
+        print(f"claude hooks: {r['hooks']}" if r["hooks"] else "claude hooks: not installed")
+        return 0
+    role = cluster.load_role()
+    if not role:
+        print("this device is not part of a cluster. `hop setup mainframe` or `hop setup client --join CODE`.")
+    if role.get("mainframe"):
+        m = role["mainframe"]
+        print(f"mainframe of cluster {m['cluster']!r} at {m['url']}")
+    if role.get("client"):
+        c = role["client"]
+        print(f"client of cluster {c['cluster']!r} at {c['url']} as {c['name']!r}" + (" (its own mainframe)" if c.get("self") else ""))
+    return 0
+
+
 def _run(a) -> int:
     if a.cmd == "mcp":
         from .mcp import run
         run()
         return 0
+
+    if a.cmd == "pulse":
+        from .client.pulse import run
+        return run()
+    if a.cmd in ("setup", "invite"):
+        return _cluster_cmd(a)
 
     hop = connect(a.db)
     worker = getattr(a, "worker", None) or _default_worker()

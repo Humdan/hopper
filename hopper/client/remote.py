@@ -10,8 +10,8 @@ import os
 import urllib.error
 import urllib.request
 
-from .api import OPS
-from .util import HopperError
+from ..api import OPS
+from ..util import HopperError
 
 
 class RemoteHopper:
@@ -57,5 +57,10 @@ def connect(db: str | None = None):
     url = os.environ.get("HOPPER_URL")
     if url and not db:
         return RemoteHopper(url, os.environ.get("HOPPER_TOKEN"))
-    from .core import Hopper
+    if not db and not os.environ.get("HOPPER_DB"):
+        from ..cluster import load_role
+        client = load_role().get("client")
+        if client and not client.get("self"):   # a joined device talks to its cluster's mainframe
+            return RemoteHopper(client["url"], client["token"])
+    from ..core import Hopper
     return Hopper(db=db)

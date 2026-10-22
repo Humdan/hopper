@@ -93,7 +93,8 @@ def load(path: str | None = None) -> Config:
 
     # Tokens are resolved lazily-safe: a missing env var disables that token with a
     # clear error only when the server starts, not for local CLI use.
-    for name, t in (raw.get("tokens") or {}).items():
+    from .cluster import read_tokens   # tokens the mainframe handed out (hop invite)
+    for name, t in {**(raw.get("tokens") or {}), **read_tokens()}.items():
         cfg.tokens.append(Token(name=name, secret=t.get("secret", ""),
                                 scopes=tuple(t.get("scopes") or ("produce",))))
 

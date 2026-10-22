@@ -17,19 +17,27 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import threading
 import time
 import urllib.parse
 from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import __version__
+from . import __version__, cluster
 from .api import ACTOR_OPS, OPS, WORKER_OPS, allowed
 from .config import resolve_secret
 from .core import Hopper
 from .util import HopperError
 
 MAX_BODY = 1 << 20  # 1 MiB is plenty for a job
+
+
+def _mtime(path: str) -> float:
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0.0
 
 
 def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool = False,
@@ -48,15 +56,32 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
     lock = threading.Lock()  # one SQLite connection; calls are short
     stop = threading.Event()
 
+    tokens_file = cluster.tokens_path()
+    tokens_seen = [_mtime(tokens_file)]
+
+    def reload_tokens() -> None:
+        """Pick up tokens `hop invite` added since the server started."""
+        stamp = _mtime(tokens_file)
+        if stamp == tokens_seen[0]:
+            return
+        tokens_seen[0] = stamp
+        for name, t in cluster.read_tokens(tokens_file).items():
+            secret = str(t.get("secret", ""))
+            if len(secret) >= 16 and all(n != name for n, _, _ in tokens):
+                tokens.append((name, secret.encode(), tuple(t.get("scopes") or ("produce",))))
+
     def authenticate(header: str):
         if no_auth and not header:
             return ("local", ("admin",))
         if not header.startswith("Bearer "):
             return None
         given = header[7:].strip().encode()
-        for name, secret, scopes in tokens:
-            if hmac.compare_digest(given, secret):
-                return (name, scopes)
+        for attempt in (0, 1):
+            for name, secret, scopes in tokens:
+                if hmac.compare_digest(given, secret):
+                    return (name, scopes)
+            if attempt == 0:
+                reload_tokens()
         return None
 
     class Handler(BaseHTTPRequestHandler):
@@ -156,7 +181,11 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
         def do_GET(self):
             url = urllib.parse.urlparse(self.path)
             if url.path == "/health":
-                return self._send(200, {"ok": True, "version": __version__})
+                with lock:
+                    meta = {r["k"]: r["v"] for r in hop._db.execute(
+                        "SELECT k, v FROM meta WHERE k IN ('cluster_id', 'cluster')")}
+                return self._send(200, {"ok": True, "version": __version__, "cluster": meta.get("cluster"),
+                                        "cluster_id": meta.get("cluster_id")})
             if url.path in ("/", "/ui", "/index.html"):
                 return self._page()
             if url.path == "/v1/stream":
