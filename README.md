@@ -1,3 +1,5 @@
+<img src="docs/brand/hopper-icon.svg" width="96" alt="Hopper logo: a yellow geometric rabbit outline">
+
 # Hopper
 
 **A durable priority job queue for AI agents.** Drop work in from anywhere (a chat bot, a
