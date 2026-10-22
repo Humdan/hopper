@@ -472,9 +472,16 @@ def _cluster_cmd(a) -> int:
         if a.leave:
             print("left the cluster" if client.leave() else "this device isn't a client")
             return 0
-        if not a.join:
-            raise HopperError("give the join code: hop setup client --join CODE")
-        r = client.join(a.join, agents=not a.no_agents)
+        code = a.join
+        if not code and sys.stdin.isatty():
+            print(theme.heading("join a cluster"))
+            print(theme.dim("  A join code comes from the cluster's mainframe: on that device run ") + theme.cmd("hop invite <name>"))
+            print(theme.dim("  and it prints one that starts with hop1.  Paste it here (or press Enter to cancel)."))
+            code = input(theme.yellow("  join code > ")).strip()
+        if not code:
+            raise HopperError("no join code. Get one on the mainframe with `hop invite <name>`, "
+                              "then run: hop setup client --join <code>")
+        r = client.join(code, agents=not a.no_agents)
         h, d = theme.heading, theme.dim
         print()
         print(theme.banner(__version__, tagline=f"client of cluster {r['cluster']!r}"))
@@ -512,6 +519,22 @@ def _home() -> int:
                                ('hop add "title"', "queue a job"), ("hop ls", "see the queue"),
                                ("hop done <id>", "finish a job you claimed")], indent=4):
         print(line)
+    from . import cluster
+    role = cluster.load_role()
+    h, c, d = theme.heading, theme.cmd, theme.dim
+    print("\n  " + h("this device"))
+    if not role:
+        print("    " + d("not connected to a cluster yet. To share a queue and dashboard with your other devices:"))
+        print(f"      {d('already have a join code?')}     {c('hop setup client --join <code>')}")
+        print(f"      {d('on the main device, get one:')}  {c('hop invite <name>')}   {d('(after hop setup mainframe)')}")
+        print(f"      {d('no mainframe yet?')}             {c('hop setup mainframe --host <address>')}   {d('or just hop init for one machine')}")
+    else:
+        if role.get("mainframe"):
+            m = role["mainframe"]
+            print(f"    {theme.ok('mainframe of ' + h(repr(m['cluster'])) + ' at ' + m['url'])}   {d('add a device:')} {c('hop invite <name>')}")
+        if role.get("client"):
+            cl = role["client"]
+            print(f"    {theme.ok('client of ' + h(repr(cl['cluster'])) + ' as ' + h(repr(cl['name'])))}   {d('details:')} {c('hop setup status')}")
     print("\n  " + theme.dim("hop --help lists every command; hop <command> -h explains one."))
     return 0
 
