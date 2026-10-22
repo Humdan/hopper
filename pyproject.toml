@@ -33,6 +33,7 @@ packages = ["hopper", "hopper.channels", "hopper.client", "hopper.mainframe", "h
 
 [tool.setuptools.package-data]
 "hopper.ui" = ["*.html"]
+"hopper.client" = ["SKILL.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "hopper.__version__" }

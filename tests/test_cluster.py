@@ -29,6 +29,13 @@ def device(root, name):
 
 
 class Cluster(unittest.TestCase):
+    def setUp(self):
+        # never run the real `claude` command from tests
+        self.claude_calls = []
+        p = mock.patch.object(client, "_claude", lambda *a: self.claude_calls.append(a))
+        p.start()
+        self.addCleanup(p.stop)
+
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
@@ -72,6 +79,8 @@ class Cluster(unittest.TestCase):
             client.install_hooks()   # twice must not duplicate
             settings = json.load(open(os.path.join(home, ".claude", "settings.json")))
             self.assertEqual(len(settings["hooks"]["Stop"]), 1)
+            self.assertTrue(os.path.exists(os.path.join(home, ".claude", "skills", "hopper", "SKILL.md")))
+            self.assertEqual(r["agents"]["mcp"].split(":")[0], "skipped")   # no `claude` here
             self.assertIsInstance(client.connect(), client.RemoteHopper)   # CLI now talks to the mainframe
             # a second cluster can't be joined without leaving
             other = cluster.encode_join("http://x", "elsewhere", "f" * 32, "t" * 20, "laptop")

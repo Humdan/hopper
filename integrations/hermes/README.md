@@ -20,7 +20,7 @@ platform's toolset allowlist.
 
 ```sh
 mkdir -p ~/.hermes/skills/productivity/hopper
-cp integrations/SKILL.md ~/.hermes/skills/productivity/hopper/SKILL.md
+cp hopper/client/SKILL.md ~/.hermes/skills/productivity/hopper/SKILL.md
 ```
 
 ## 3. Messages become jobs

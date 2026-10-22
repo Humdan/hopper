@@ -20,7 +20,7 @@ claude mcp add hopper -e HOPPER_URL=https://queue.example.com -e HOPPER_TOKEN=..
 
 ```sh
 mkdir -p ~/.claude/skills/hopper
-cp integrations/SKILL.md ~/.claude/skills/hopper/SKILL.md
+cp hopper/client/SKILL.md ~/.claude/skills/hopper/SKILL.md
 ```
 
 ## 3. Claude Code as a worker

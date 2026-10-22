@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -46,8 +47,7 @@ def join(code: str, agents: bool = True) -> dict:
                       "token": data["token"], "name": data["name"],
                       "self": bool(mf and mf["id"] == data["id"])}
     cluster.save_role(role)
-    hooks = install_hooks() if agents else None
-    return {**role["client"], "token": "…", "hooks": hooks}
+    return {**role["client"], "token": "…", "agents": install_agents() if agents else None}
 
 
 def leave() -> bool:
@@ -55,7 +55,7 @@ def leave() -> bool:
     if not role.pop("client", None):
         return False
     cluster.save_role(role)
-    remove_hooks()
+    remove_agents()
     return True
 
 
@@ -109,3 +109,49 @@ def remove_hooks() -> None:
             del hooks[ev]
     with open(path, "w") as fh:
         json.dump(settings, fh, indent=2)
+
+
+def _hop() -> str:
+    return shutil.which("hop") or "hop"
+
+
+def _claude(*args: str) -> subprocess.CompletedProcess | None:
+    claude = shutil.which("claude")
+    if not claude:
+        return None
+    try:
+        return subprocess.run([claude, *args], capture_output=True, text=True, timeout=45)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def install_skill() -> str:
+    """Teach Claude Code what Hopper is and how to use it (a user-level skill)."""
+    from importlib import resources
+    dest = os.path.expanduser("~/.claude/skills/hopper/SKILL.md")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "w") as fh:
+        fh.write(resources.files("hopper.client").joinpath("SKILL.md").read_text(encoding="utf-8"))
+    return dest
+
+
+def install_mcp() -> str:
+    """Give Claude Code the hop_* tools. `hop mcp` reads this device's cluster membership, so no token goes in the config."""
+    if _claude("--version") is None:
+        return "skipped: the `claude` command isn't on PATH. Run later: claude mcp add --scope user hopper -- hop mcp"
+    _claude("mcp", "remove", "hopper", "--scope", "user")   # replace an older entry, e.g. a moved `hop`
+    r = _claude("mcp", "add", "--scope", "user", "hopper", "--", _hop(), "mcp")
+    if r is None or r.returncode != 0:
+        return f"failed: {(r.stderr or r.stdout).strip()[:160] if r else 'timed out'}"
+    return "added to Claude Code (user scope)"
+
+
+def install_agents() -> dict:
+    """Everything Claude Code needs to work with this cluster: the presence hook, the tools and the skill."""
+    return {"hooks": install_hooks(), "skill": install_skill(), "mcp": install_mcp()}
+
+
+def remove_agents() -> None:
+    remove_hooks()
+    shutil.rmtree(os.path.expanduser("~/.claude/skills/hopper"), ignore_errors=True)
+    _claude("mcp", "remove", "hopper", "--scope", "user")

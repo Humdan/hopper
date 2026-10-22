@@ -16,7 +16,7 @@ or in `~/.openclaw/openclaw.json`:
 
 Add `HOPPER_URL` / `HOPPER_TOKEN` to the server's environment to use a remote Hopper.
 
-For the protocol, give the agent `integrations/SKILL.md` as a skill.
+For the protocol, give the agent `hopper/client/SKILL.md` as a skill.
 
 To run OpenClaw as a worker, point `hop work --exec` at any OpenClaw command that takes a
 prompt on stdin or from a file (`{prompt_file}`).

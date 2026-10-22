@@ -230,7 +230,8 @@ def build_parser() -> argparse.ArgumentParser:
     cl = setup_sub.add_parser("client", help="join a cluster with a join code from `hop invite`")
     cl.add_argument("--join", metavar="CODE", help="the join code the mainframe printed")
     cl.add_argument("--leave", action="store_true", help="leave the cluster and remove the hooks")
-    cl.add_argument("--no-agents", action="store_true", help="don't register the Claude Code hooks")
+    cl.add_argument("--no-agents", action="store_true", help="don't set up Claude Code (hooks, tools, skill)")
+    setup_sub.add_parser("agents", help="(re)install Claude Code's hooks, hop tools and skill for the cluster this device joined")
     setup_sub.add_parser("status", help="show what this device is")
 
     sp = cmd("invite", "mainframe only: create a join code for another device")
@@ -437,8 +438,26 @@ mainframe (holds the queue and the dashboard) and any number of clients. One dev
 """
 
 
+def _print_agents(res: dict | None) -> None:
+    h, d = theme.heading, theme.dim
+    if not res:
+        print(f"  {d('Claude Code not set up (--no-agents); run `hop setup agents` later')}")
+        return
+    print(theme.ok(f"presence hook {d(res['hooks'])}"))
+    print(theme.ok(f"skill {d(res['skill'])}"))
+    mcp = res["mcp"]
+    print(theme.ok(f"hop tools {d(mcp)}") if mcp.startswith("added") else f"  {h('!')} hop tools {d(mcp)}")
+    print(f"\n  {h('next')}  fully quit and reopen Claude Code (new sessions only), then ask it: "
+          f"{theme.cmd('what is Hopper?')}\n")
+
+
 def _cluster_cmd(a) -> int:
     from . import client, cluster, mainframe
+    if a.cmd == "setup" and a.role == "agents":
+        if not cluster.load_role().get("client"):
+            raise HopperError("this device hasn't joined a cluster; run `hop setup client --join <code>` first")
+        _print_agents(client.install_agents())
+        return 0
     if a.cmd == "invite":
         scopes = tuple(x for x in a.scopes.split(",") if x)
         code = mainframe.invite(a.device, scopes, allow_local=a.local)
@@ -486,9 +505,7 @@ def _cluster_cmd(a) -> int:
         print()
         print(theme.banner(__version__, tagline=f"client of cluster {r['cluster']!r}"))
         print(f"\n{theme.ok('joined ' + h(repr(r['cluster'])) + ' at ' + r['url'] + ' as ' + h(repr(r['name'])))}")
-        print(theme.ok(f"claude hooks installed {d(r['hooks'])}") if r["hooks"] else
-              f"  {d('claude hooks not installed (--no-agents)')}")
-        print(f"\n  {h('next')}  start a new Claude Code session and send a prompt: this device appears on the dashboard.\n")
+        _print_agents(r["agents"])
         return 0
     role = cluster.load_role()
     if a.role is None:

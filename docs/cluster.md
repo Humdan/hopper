@@ -60,9 +60,10 @@ On the laptop (after installing Hopper as above):
 hop setup client --join <code>
 ```
 
-This checks it reached the right mainframe, saves the membership, and registers a hook so your Claude Code sessions
-show up on the dashboard. Start a new Claude Code session and send a prompt: within a few seconds the laptop appears
-under **Sessions**. From now on `hop add`, `hop ls` and the rest on the laptop talk to the mainframe.
+This checks it reached the right mainframe, saves the membership, and sets up Claude Code with three things: a hook so
+your sessions show on the dashboard, the `hop_*` tools (an MCP server) so Claude can queue and take jobs, and a skill
+that teaches Claude what Hopper is. Fully quit and reopen Claude Code, start a new session, and send a prompt: within a
+few seconds the laptop appears under **Sessions**, and you can ask Claude "what is Hopper?". From now on `hop add`, `hop ls` and the rest on the laptop talk to the mainframe.
 
 Already-open Claude Code sessions don't appear until you restart them.
 
@@ -74,6 +75,7 @@ Already-open Claude Code sessions don't appear until you restart them.
 | `hop setup` | explains the two roles and what to run |
 | `hop invite <name>` | (mainframe) a join code for another device |
 | `hop setup client --leave` | leave the cluster and remove the hooks |
+| `hop setup agents` | (re)install Claude Code's hook, tools and skill on a device that already joined |
 | `hop setup client --join <code> --no-agents` | join without touching Claude Code's settings |
 
 ## One mainframe per cluster
@@ -112,6 +114,7 @@ Releases bump the version number, so a normal upgrade picks them up.
 | `the mainframe's address is http://127.0.0.1... which other devices can't reach` | set up the mainframe with `--host <reachable address>` (or `--advertise URL`). To test on one machine, use `hop invite --local` |
 | `this device is already a client of cluster ...` | leave first with `hop setup client --leave` |
 | `... isn't valid JSON` (about `~/.claude/settings.json`) | fix or move that file aside, then run the join again |
+| Claude says it doesn't know what Hopper is | the device joined before 0.5.2, or `claude` wasn't on PATH at the time. Update (`pipx upgrade hopper-queue`), run `hop setup agents`, then fully quit and reopen Claude Code |
 | the device joined but doesn't show under Sessions | restart Claude Code (open sessions don't pick up new hooks), then send a prompt. `hop pulse` is the hook; it never fails a session, so errors are silent |
 
 ## Where things live

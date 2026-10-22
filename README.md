@@ -163,7 +163,7 @@ Optional, off unless configured ([docs/channels.md](docs/channels.md)):
 - [Claude Code](integrations/claude-code/README.md)
 - [Hermes Agent](integrations/hermes/README.md)
 - [OpenClaw](integrations/openclaw/README.md)
-- [A skill that teaches any agent the protocol](integrations/SKILL.md)
+- [A skill that teaches any agent the protocol](hopper/client/SKILL.md)
 - [systemd units](examples/systemd/)
 
 ## Security
