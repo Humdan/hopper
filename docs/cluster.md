@@ -85,6 +85,23 @@ cluster at a time: `hop setup client --leave` before joining another.
 
 New invites work without restarting the server.
 
+## Updating
+
+On any device:
+
+```sh
+pipx upgrade hopper-queue          # or: pip install --upgrade git+https://github.com/Humdan/hopper
+hop --version
+```
+
+Updating changes only the program. Your cluster membership (`role.json`), tokens, config and the queue itself live in
+`~/.config/hopper` and `~/.local/share/hopper` and are left alone, and the Claude Code hooks keep working. After
+updating the **mainframe**, restart its service so the server runs the new code (`systemctl --user restart
+hopper-mainframe` on Linux, or stop and start `hop serve`). Clients and the mainframe can be updated in any order.
+
+If an update doesn't seem to change anything, force it: `pipx install --force git+https://github.com/Humdan/hopper`.
+Releases bump the version number, so a normal upgrade picks them up.
+
 ## Troubleshooting
 
 | You see | What it means and what to do |
