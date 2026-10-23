@@ -89,6 +89,39 @@ class Web(unittest.TestCase):
         self.assertIn("Hopper", body)
         self.assertNotIn("j_", body.split("<script>")[0])
 
+    def page(self):
+        return self.get("/").read().decode()
+
+    def test_page_script_parses(self):
+        import re
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        js = re.search(r"<script>(.*)</script>", self.page(), re.S).group(1)
+        path = os.path.join(self._tmp.name, "ui.js")
+        with open(path, "w") as f:
+            f.write(js)
+        done = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_page_keeps_state_and_links_to_jobs(self):
+        body = self.page()
+        for marker in ('hopper.tab', 'hopper.queue', 'hopper.q"', 'hopper.showOld',   # filters survive a reload
+                       '#job=', 'hashchange',                                          # drawer deep link and Back
+                       'drafts[', 'keepTop',                                           # drawer keeps typing and scroll
+                       'snapSig', 'jobMark'):                                          # no re-render when nothing changed
+            self.assertIn(marker, body)
+
+    def test_page_has_the_job_table_and_dialog_helpers(self):
+        body = self.page()
+        for marker in ('id="retryAll"', '{class: "failmsg"', 'tabindex: 0', 'retryMany',  # failed jobs: retry one or all
+                       'id="queueList"', 'hopper.addQueue', 'ctrlKey || e.metaKey',     # add dialog
+                       'copyId', 'tickConn', 'updated '):                               # copy id, stalled-stream hint
+            self.assertIn(marker, body)
+        self.assertNotIn(".innerHTML", body)   # all text goes through textContent
+
     def test_data_needs_a_token(self):
         for path in ("/v1/overview", "/v1/stream", "/v1/workers"):
             with self.assertRaises(urllib.error.HTTPError) as cm:

@@ -120,6 +120,8 @@ dialog input,dialog textarea,dialog select{background:var(--panel2);border:1px s
 .toast.on{opacity:1}
 .login{max-width:380px;margin:12vh auto;display:grid;gap:12px;padding:24px}
 .err{color:var(--fail);font-size:12px;min-height:16px}
+.failmsg{color:var(--fail);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:480px}
+tbody tr:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 </style>
 </head>
 <body>
@@ -144,9 +146,10 @@ dialog input,dialog textarea,dialog select{background:var(--panel2);border:1px s
           <div class="tabs" id="tabs"></div>
           <div class="sp"></div>
           <select class="f" id="qSel"><option value="">All queues</option></select>
+          <button class="btn sm danger" id="retryAll" hidden></button>
           <input class="f" id="search" placeholder="Search title, id, tag, source…" size="26">
         </div>
-        <div class="scroll"><table><thead><tr><th>Status</th><th>P</th><th>Queue</th><th>Job</th><th>Worker</th><th>Age</th><th>Try</th></tr></thead><tbody id="jobs"></tbody></table></div>
+        <div class="scroll"><table><thead><tr><th>Status</th><th>P</th><th>Queue</th><th>Job</th><th>Worker</th><th>Age</th><th>Try</th><th></th></tr></thead><tbody id="jobs"></tbody></table></div>
         <div class="empty" id="jobsEmpty" hidden>No jobs match.</div>
         <div class="sub" id="jobsNote" style="padding:8px 16px;white-space:normal" hidden></div>
       </section>
@@ -178,7 +181,7 @@ dialog input,dialog textarea,dialog select{background:var(--panel2);border:1px s
   <label>Instructions<textarea name="body" rows="5"></textarea></label>
   <label>Done when (optional)<input name="done_when"></label>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-    <label>Queue<input name="queue" value="default"></label>
+    <label>Queue<input name="queue" value="default" list="queueList" autocomplete="off"><datalist id="queueList"></datalist></label>
     <label>Priority<select name="priority"><option>low</option><option selected>normal</option><option>high</option><option>urgent</option></select></label>
     <label>Project<input name="project"></label>
   </div>
@@ -215,7 +218,11 @@ function clock(ts) { return new Date(ts * 1000).toLocaleTimeString([], {hour: "2
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 2600); }
 
 let token = store.get("hopper.token") || "";
-let snap = null, skew = 0, tab = "open", queueFilter = "", text = "", openJob = null;
+const TAB_KEYS = ["open", "running", "needs_input", "queued", "waiting", "done", "failed", "cancelled", "all"];
+let snap = null, skew = 0, openJob = null, lastPush = 0, snapSig = "";
+let tab = TAB_KEYS.includes(store.get("hopper.tab")) ? store.get("hopper.tab") : "open";
+let queueFilter = store.get("hopper.queue") || "", text = store.get("hopper.q") || "";
+const setTab = t => { tab = t; store.set("hopper.tab", t); };
 
 async function api(op, args, method = "POST") {
   const r = await fetch(method === "GET" ? "/v1/" + op : "/v1/" + op, {
@@ -229,7 +236,16 @@ async function api(op, args, method = "POST") {
 
 // ── connection: server-sent events over fetch (EventSource can't send the auth header), poll as fallback ──
 let abort = null, retry = 1000;
-function setConn(state, msg) { const d = $("#conn"); d.className = "dot " + state; $("#connText").textContent = msg; }
+let connState = "", connMsg = "";
+function setConn(state, msg) { connState = state; connMsg = msg; const d = $("#conn"); d.className = "dot " + state; $("#connText").textContent = msg; }
+// "live · updated 3s ago"; the server re-sends every 5 s, so 30 s of silence means the stream has stalled
+function tickConn() {
+  if (!lastPush || (connState !== "on" && connState !== "away")) return;
+  const s = Math.round((Date.now() - lastPush) / 1000), stale = s > 30;
+  const d = $("#conn"), want = "dot " + (stale ? "away" : "on");
+  if (d.className !== want) d.className = want;
+  $("#connText").textContent = (stale ? "stalled" : "live") + " · updated " + (s < 2 ? "just now" : s + "s ago");
+}
 async function connect() {
   if (abort) abort.abort();
   abort = new AbortController();
@@ -238,7 +254,7 @@ async function connect() {
     const r = await fetch("/v1/stream", {headers: {"Authorization": "Bearer " + token}, signal: abort.signal});
     if (r.status === 401) return showLogin("That token was not accepted.");
     if (!r.ok || !r.body) throw new Error("stream " + r.status);
-    hideLogin(); setConn("on", "live"); retry = 1000;
+    hideLogin(); setConn("on", "live"); retry = 1000; lastPush = Date.now();
     const rd = r.body.getReader(), dec = new TextDecoder();
     let buf = "";
     for (;;) {
@@ -260,13 +276,19 @@ async function connect() {
   }
 }
 function showLogin(msg) { token = ""; store.set("hopper.token", null); if (abort) abort.abort(); $("#app").hidden = true; $("#login").hidden = false; $("#loginErr").textContent = msg || ""; setConn("", "signed out"); }
-function hideLogin() { $("#login").hidden = true; $("#app").hidden = false; }
+function hideLogin() { $("#login").hidden = true; $("#app").hidden = false; syncHash(); }
 
+// what makes two snapshots "the same": everything except the clock and the per-worker seen_ago_s counter
+const sigOf = s => JSON.stringify(s, (k, v) => (k === "now" || k === "seen_ago_s") ? undefined : v);
+function jobMark(s, id) { const j = s && s.jobs.find(x => x.id === id); return j ? [j.status, j.updated_at, j.attempts, j.progress].join("|") : ""; }
 function apply(s) {
+  lastPush = Date.now(); tickConn();
   skew = Date.now() / 1000 - s.now;
-  snap = s;
+  const sig = sigOf(s), before = snap ? jobMark(snap, openJob) : "";
+  if (sig === snapSig) return;            // nothing changed: leave the DOM (scroll, focus, hover) alone
+  snapSig = sig; snap = s;
   render();
-  if (openJob) refreshDrawerLight();
+  if (openJob && jobMark(s, openJob) !== before) refreshDrawerLight();
 }
 const nowS = () => Date.now() / 1000 - skew;
 
@@ -287,14 +309,14 @@ function render() {
     ["Failed (24 h)", failed24, c.failed + " all time", "tab:failed", failed24 ? "var(--fail)" : null],
     ["Spend today", money(costToday), money(snap.cost_days.reduce((a, d) => a + d.cost, 0)) + " this week", null],
   ];
-  clear($("#kpis"), k.map(([l, n, s, go, col]) => h("div", {class: "kpi" + (go ? " click" : ""), onclick: go ? () => { tab = go.slice(4); renderJobs(); $("#tabs").scrollIntoView({block: "center"}); } : null},
+  clear($("#kpis"), k.map(([l, n, s, go, col]) => h("div", {class: "kpi" + (go ? " click" : ""), onclick: go ? () => { setTab(go.slice(4)); renderTabs(); renderJobs(); $("#tabs").scrollIntoView({block: "center"}); } : null},
     h("div", {class: "n", style: col ? "color:" + col : null}, n), h("div", {class: "l"}, l), h("div", {class: "s"}, s))));
   renderWorkers(); renderTabs(); renderQueueSel(); renderJobs(); renderFeed(); renderQueues(); renderCharts(); renderSources();
   document.title = (c.needs_input ? "● " : "") + "Hopper · " + c.running + " running, " + c.queued + " queued";
   $("#ver").textContent = "";
 }
 function pill(st) { return h("span", {class: "pill " + st}, LABEL[st] || st); }
-let showOld = false;
+let showOld = store.get("hopper.showOld") === "1";
 const OLD_S = 6 * 3600;   // offline this long = hidden unless "show old" is on
 function workerCard(w) {
   const isSession = w.kind === "session";
@@ -315,7 +337,7 @@ function renderWorkers() {
   const btn = $("#oldBtn");
   btn.style.display = old.length ? "" : "none";
   btn.textContent = (showOld ? "hide " : "show ") + old.length + " old";
-  btn.onclick = () => { showOld = !showOld; renderWorkers(); };
+  btn.onclick = () => { showOld = !showOld; store.set("hopper.showOld", showOld ? "1" : null); renderWorkers(); };
   if (!all.length) return clear($("#workers"), h("div", {class: "empty"}, "Nobody has connected yet. Start a worker with ", h("span", {class: "mono"}, "hop work --exec …")));
   const sort = list => [...list].sort((a, b) => order[a.status] - order[b.status] || a.machine.localeCompare(b.machine) || a.name.localeCompare(b.name));
   const group = (title, caption, list) => list.length ? [
@@ -330,12 +352,13 @@ function matchTab(j) { return tab === "all" ? true : tab === "open" ? ["running"
 function renderTabs() {
   clear($("#tabs"), TABS.map(([k, l]) => {
     const c = snap.counts, n = k === "all" ? Object.values(c).reduce((a, b) => a + b, 0) : k === "open" ? c.running + c.needs_input + c.queued + c.waiting : c[k] || 0;
-    return h("button", {class: "tab" + (tab === k ? " on" : ""), onclick: () => { tab = k; renderTabs(); renderJobs(); }}, l, h("span", {class: "c"}, n));
+    return h("button", {class: "tab" + (tab === k ? " on" : ""), onclick: () => { setTab(k); renderTabs(); renderJobs(); }}, l, h("span", {class: "c"}, n));
   }));
 }
 function renderQueueSel() {
   const sel = $("#qSel"), want = Object.keys(snap.queues).sort(), have = [...sel.options].slice(1).map(o => o.value);
-  if (want.join() !== have.join()) { clear(sel, h("option", {value: ""}, "All queues"), want.map(q => h("option", {value: q}, q))); sel.value = queueFilter; }
+  if (want.join() !== have.join()) { clear(sel, h("option", {value: ""}, "All queues"), want.map(q => h("option", {value: q}, q))); if (queueFilter && !want.includes(queueFilter)) { queueFilter = ""; store.set("hopper.queue", null); } sel.value = queueFilter; }
+  const dl = $("#queueList"); if (dl.children.length !== want.length) clear(dl, want.map(q => h("option", {value: q})));
 }
 function ageText(kind, ts) { return kind === "fin" ? "finished " + ago(nowS() - ts) + " ago" : kind === "run" ? "running " + dur(nowS() - ts) : "waiting " + ago(nowS() - ts); }
 function renderJobs() {
@@ -346,27 +369,41 @@ function renderJobs() {
   $("#jobsEmpty").hidden = rows.length > 0;
   const total = tab === "all" ? Object.values(snap.counts).reduce((a, b) => a + b, 0) : tab === "open" ? 0 : snap.counts[tab] || 0;
   $("#jobsNote").hidden = !(total > rows.length && !queueFilter && !text);
+  const failedRows = tab === "failed" ? rows.filter(j => j.status === "failed") : [];
+  const ra = $("#retryAll"); ra.hidden = !failedRows.length; ra.textContent = "Retry all (" + failedRows.length + ")";
+  ra.onclick = () => retryMany(failedRows);
   $("#jobsNote").textContent = "Showing the latest " + rows.length + " of " + total + " (history older than that is in `hop ls -s all`).";
   clear($("#jobs"), rows.map(j => {
     const fin = ["done", "failed", "cancelled"].includes(j.status);
     const kind = fin ? "fin" : j.status === "running" ? "run" : "wait", ts = fin ? j.finished_at : j.status === "running" ? (j.started_at || j.created_at) : j.created_at;
-    return h("tr", {onclick: () => openDrawer(j.id)},
+    const failed = j.status === "failed";
+    return h("tr", {tabindex: 0, onclick: () => openDrawer(j.id), onkeydown: e => { if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); openDrawer(j.id); } }},
       h("td", {}, pill(j.status)),
       h("td", {class: "prio" + (j.priority >= 75 ? " hi" : "")}, j.priority),
       h("td", {}, h("span", {class: "chip"}, j.queue)),
       h("td", {}, h("div", {class: "title", title: j.title}, j.title),
-        h("div", {class: "sub"}, [j.project, j.source ? "from " + j.source : null, j.progress || j.summary].filter(Boolean).join(" · ")),
+        h("div", {class: "sub"}, [j.project, j.source ? "from " + j.source : null, failed ? null : (j.progress || j.summary)].filter(Boolean).join(" · ")),
+        failed && j.summary ? h("div", {class: "failmsg", title: j.summary}, j.summary) : null,
         (snap.unserved || {})[j.id] ? h("div", {class: "sub", style: "color:var(--fail)", title: snap.unserved[j.id]}, "⚠ nobody can take this: " + snap.unserved[j.id]) : null),
       h("td", {class: "sub"}, j.lease_owner || ""),
       h("td", {class: "sub age", style: "white-space:nowrap", "data-kind": kind, "data-ts": ts}, ageText(kind, ts)),
-      h("td", {class: "sub"}, j.attempts + "/" + j.max_attempts));
+      h("td", {class: "sub"}, j.attempts + "/" + j.max_attempts),
+      h("td", {}, failed ? h("button", {class: "btn sm", onclick: e => { e.stopPropagation(); retryMany([j]); }}, "Retry") : null));
   }));
 }
+async function retryMany(list) {
+  if (!list.length || (list.length > 1 && !confirm("Retry " + list.length + " failed jobs?"))) return;
+  let ok = 0, bad = 0;
+  for (const j of list) { try { await api("retry", {job_id: j.id}); ok++; } catch (e) { bad++; } }
+  toast(bad ? "Re-queued " + ok + ", " + bad + " could not be retried" : "Re-queued " + ok);
+}
 function renderFeed() {
+  const top = $("#feed").scrollTop;
   const words = {added: "added", claimed: "started", completed: "finished", failed: "failed", progress: "progress", asked: "asked a question", answered: "answered", lease_expired: "lease expired", retry_scheduled: "will retry", released: "released", cancelled: "cancelled", bumped: "re-prioritised", retried: "retried"};
   clear($("#feed"), snap.activity.length ? snap.activity.map(e => h("div", {class: "ev k-" + e.kind, onclick: e.job_id ? () => openDrawer(e.job_id) : null},
     h("span", {class: "t"}, clock(e.at)),
     h("span", {}, e.kind === "pulse" ? null : h("span", {class: "k"}, words[e.kind] || e.kind), e.kind === "pulse" ? null : " ", e.title || e.job_id, h("div", {class: "sub"}, [e.actor, e.text].filter(Boolean).join(" · "))))) : h("div", {class: "empty"}, "Nothing has happened yet."));
+  $("#feed").scrollTop = top;
 }
 function renderQueues() {
   const names = Object.keys(snap.queues).sort();
@@ -413,12 +450,19 @@ function renderSources() {
 }
 
 // ── job drawer ──
-async function openDrawer(id) {
+const drafts = {};   // unsent answers, per job id, so a refill never wipes what you were typing
+async function showDrawer(id) {
+  if (openJob === id) return;
   openJob = id; $("#bg").classList.add("on"); $("#drawer").classList.add("on");
   clear($("#drawer"), h("div", {class: "sec"}, "Loading…"));
   await fillDrawer();
 }
-function closeDrawer() { openJob = null; $("#bg").classList.remove("on"); $("#drawer").classList.remove("on"); }
+function hideDrawer() { openJob = null; $("#bg").classList.remove("on"); $("#drawer").classList.remove("on"); }
+// the URL is the source of truth: #job=<id> opens the drawer, anything else closes it, Back works
+function openDrawer(id) { if (location.hash === "#job=" + id) showDrawer(id); else location.hash = "job=" + id; }
+function closeDrawer() { if (location.hash) history.pushState(null, "", location.pathname + location.search); hideDrawer(); }
+function syncHash() { const m = /^#job=(.+)$/.exec(location.hash); if (m) showDrawer(decodeURIComponent(m[1])); else if (openJob) hideDrawer(); }
+window.addEventListener("hashchange", syncHash);
 let drawerBusy = false;
 async function refreshDrawerLight() { if (!drawerBusy) { drawerBusy = true; try { await fillDrawer(); } finally { drawerBusy = false; } } }
 async function fillDrawer() {
@@ -430,19 +474,22 @@ async function fillDrawer() {
   const open = ["queued", "running", "needs_input", "waiting"].includes(j.status);
   const res = j.result && typeof j.result === "object" ? j.result : null;
   const act = async (label, fn) => { try { await fn(); toast(label); await fillDrawer(); } catch (e) { toast(e.message); } };
-  const answerIn = h("textarea", {rows: 3, class: "f", style: "width:100%", placeholder: "Your answer…"});
+  const answerIn = h("textarea", {rows: 3, class: "f", style: "width:100%", placeholder: "Your answer…", "data-draft": id, oninput: e => { drafts[id] = e.target.value; }});
+  answerIn.value = drafts[id] || "";
+  const dr = $("#drawer"), keepTop = dr.scrollTop, ae = document.activeElement;
+  const refocus = ae && ae.dataset && ae.dataset.draft === id ? [ae.selectionStart, ae.selectionEnd] : null;
   const kv = [["ID", j.id], ["Queue", j.queue], ["Priority", String(j.priority)], ["Project", j.project || "—"], ["Source", j.source || "—"], ["Worker", j.lease_owner || (res && res.by) || "—"],
     ["Attempts", j.attempts + " of " + j.max_attempts], ["Created", new Date(j.created_at * 1000).toLocaleString()],
     ["Started", j.started_at ? new Date(j.started_at * 1000).toLocaleString() : "—"], ["Finished", j.finished_at ? new Date(j.finished_at * 1000).toLocaleString() : "—"],
     ["Tags", (j.tags || []).join(", ") || "—"], ["Requires", (j.requires || []).join(", ") || "—"]];
   clear($("#drawer"),
-    h("div", {class: "hd"}, h("div", {class: "row-actions"}, pill(j.status), h("span", {class: "sp"}), h("button", {class: "btn sm", onclick: closeDrawer}, "Close")), h("div", {style: "font-size:16px;font-weight:600"}, j.title)),
+    h("div", {class: "hd"}, h("div", {class: "row-actions"}, pill(j.status), h("span", {class: "sp"}), h("button", {class: "btn sm", onclick: () => copyId(j.id)}, "Copy id"), h("button", {class: "btn sm", onclick: closeDrawer}, "Close")), h("div", {style: "font-size:16px;font-weight:600"}, j.title)),
     open ? h("div", {class: "sec"}, h("div", {class: "row-actions"},
       h("button", {class: "btn sm", onclick: () => act("Bumped", () => api("bump", {job_id: id, priority: "urgent"}))}, "Make urgent"),
       h("button", {class: "btn sm", onclick: () => act("Raised", () => api("bump", {job_id: id, priority: Math.min(100, j.priority + 10)}))}, "+10"),
       h("button", {class: "btn sm danger", onclick: () => { if (confirm("Cancel this job?")) act("Cancelled", () => api("cancel", {job_id: id, reason: "cancelled from the dashboard"})); }}, "Cancel"))) : null,
     !open && j.status !== "done" ? h("div", {class: "sec"}, h("button", {class: "btn sm", onclick: () => act("Re-queued", () => api("retry", {job_id: id}))}, "Retry")) : null,
-    j.status === "needs_input" ? h("div", {class: "sec"}, h("h3", {}, "Waiting on you"), answerIn, h("div", {style: "margin-top:8px"}, h("button", {class: "btn primary sm", onclick: () => act("Answered", () => api("answer", {job_id: id, text: answerIn.value}))}, "Send answer"))) : null,
+    j.status === "needs_input" ? h("div", {class: "sec"}, h("h3", {}, "Waiting on you"), answerIn, h("div", {style: "margin-top:8px"}, h("button", {class: "btn primary sm", onclick: () => act("Answered", () => api("answer", {job_id: id, text: answerIn.value}).then(r => { delete drafts[id]; return r; }))}, "Send answer"))) : null,
     h("div", {class: "sec"}, h("div", {class: "kv"}, kv.flatMap(([a, b]) => [h("span", {}, a), h("span", {class: a === "ID" ? "mono" : ""}, b)]))),
     j.body ? h("div", {class: "sec"}, h("h3", {}, "Instructions"), h("pre", {}, j.body)) : null,
     j.done_when ? h("div", {class: "sec"}, h("h3", {}, "Done when"), h("div", {}, j.done_when)) : null,
@@ -452,11 +499,18 @@ async function fillDrawer() {
     us.length ? h("div", {class: "sec"}, h("h3", {}, "Runs"), us.map(u => h("div", {class: "sub", style: "white-space:normal"}, "attempt " + (u.attempt ?? "?") + " · " + (u.worker || "") + " · " + (u.duration_s != null ? dur(u.duration_s) : "—") + " · " + (u.cost_usd != null ? money(u.cost_usd) : "no cost") + (u.model ? " · " + u.model : "")))) : null,
     h("div", {class: "sec"}, h("h3", {}, "Timeline"), h("div", {class: "tl"}, ev.map(e => h("div", {}, h("span", {class: "sub"}, clock(e.at)), h("b", {}, e.kind), h("span", {}, [e.actor, e.text || e.reason].filter(Boolean).join(" · "))))))
   );
+  dr.scrollTop = keepTop;
+  if (refocus) { answerIn.focus(); try { answerIn.setSelectionRange(...refocus); } catch {} }
+}
+async function copyId(id) {
+  try { await navigator.clipboard.writeText(id); toast("Copied " + id); }
+  catch { const t = h("textarea", {style: "position:fixed;opacity:0"}); t.value = id; document.body.append(t); t.select(); try { document.execCommand("copy"); toast("Copied " + id); } catch { toast(id); } t.remove(); }
 }
 
 // ── wiring ──
-$("#search").addEventListener("input", e => { text = e.target.value; if (snap) renderJobs(); });
-$("#qSel").addEventListener("change", e => { queueFilter = e.target.value; if (snap) renderJobs(); });
+$("#search").value = text;
+$("#search").addEventListener("input", e => { text = e.target.value; store.set("hopper.q", text || null); if (snap) renderJobs(); });
+$("#qSel").addEventListener("change", e => { queueFilter = e.target.value; store.set("hopper.queue", queueFilter || null); if (snap) renderJobs(); });
 $("#bg").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") { e.preventDefault(); $("#search").focus(); } });
 $("#tokGo").addEventListener("click", () => { const v = $("#tokIn").value.trim(); if (!v) return; token = v; store.set("hopper.token", v); $("#tokIn").value = ""; connect(); });
@@ -464,7 +518,14 @@ $("#tokIn").addEventListener("keydown", e => { if (e.key === "Enter") $("#tokGo"
 $("#tokBtn").addEventListener("click", () => showLogin(""));
 $("#themeBtn").addEventListener("click", () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = dark ? "light" : "dark"; store.set("hopper.theme", r.dataset.theme); });
 if (store.get("hopper.theme")) document.documentElement.dataset.theme = store.get("hopper.theme");
-$("#addBtn").addEventListener("click", () => { $("#addErr").textContent = ""; $("#addDlg").showModal(); });
+$("#addBtn").addEventListener("click", () => {
+  $("#addErr").textContent = "";
+  const f = $("#addForm");
+  f.elements.queue.value = store.get("hopper.addQueue") || "default";
+  const pr = store.get("hopper.addPrio"); if (pr) f.elements.priority.value = pr;
+  $("#addDlg").showModal(); f.elements.title.focus();
+});
+$("#addForm").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#addGo").click(); } });
 $("#addForm").addEventListener("submit", async e => {
   if (e.submitter && e.submitter.value !== "go") return;
   e.preventDefault();
@@ -472,9 +533,11 @@ $("#addForm").addEventListener("submit", async e => {
   const args = {title: f.title, body: f.body || "", queue: f.queue || "default", priority: f.priority};
   if (f.done_when) args.done_when = f.done_when;
   if (f.project) args.project = f.project;
-  try { const j = await api("add", args); $("#addDlg").close(); e.target.reset(); toast("Added " + j.id); }
+  try { const j = await api("add", args); store.set("hopper.addQueue", args.queue); store.set("hopper.addPrio", args.priority); $("#addDlg").close(); e.target.reset(); toast("Added " + j.id); }
   catch (err) { $("#addErr").textContent = err.message; }
 });
+setInterval(tickConn, 1000);
+setInterval(() => { if (snap) renderWorkers(); }, 10000);   // "seen Ns ago" on worker cards
 setInterval(() => { if (snap) document.querySelectorAll("td.age").forEach(td => { td.textContent = ageText(td.dataset.kind, +td.dataset.ts); }); }, 1000);   // keep ages moving between pushes
 fetch("/health").then(r => r.json()).then(j => { $("#ver").textContent = "v" + j.version; }).catch(() => {});
 if (token) connect(); else showLogin("");
