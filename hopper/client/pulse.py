@@ -41,12 +41,27 @@ def main() -> None:
     proj = os.path.basename((ev.get("cwd") or os.getcwd()).rstrip("/")) or "home"
     url, token = os.environ.get("HOPPER_URL"), os.environ.get("HOPPER_TOKEN")
     # over HTTP the server already prefixes the token's name (which is the machine), so leave the host out
-    name = os.environ.get("HOPPER_SESSION_NAME") or (f"claude:{proj}" if url else f"{host}/claude:{proj}")
     sid = (ev.get("session_id") or "x")[:8]
     stamp = f"/tmp/hop-pulse-{sid}"
+    # One session, one name: pin it to the folder the session started in, so `cd` mid-session
+    # does not make a single window show up as several.
+    namefile = f"/tmp/hop-pulse-name-{sid}"
+    try:
+        proj = open(namefile).read().strip() or proj
+    except OSError:
+        try:
+            open(namefile, "w").write(proj)
+        except OSError:
+            pass
+    name = os.environ.get("HOPPER_SESSION_NAME") or (f"claude:{proj}" if url else f"{host}/claude:{proj}")
     args = {"worker": name, "kind": "session"}
     if kind == "SessionEnd":
         args["end"] = True
+        for f in (namefile, stamp):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
     elif kind == "Stop":
         args["doing"] = "idle"
     elif kind == "SessionStart":

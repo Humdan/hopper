@@ -742,7 +742,7 @@ class Hopper:
 
     # ── live view (the web UI and `hop serve` read these) ──────────────────────
 
-    SESSION_BUSY_S, SESSION_AWAY_S, SESSION_OFF_S = 120, 1800, 6 * 3600
+    SESSION_BUSY_S, SESSION_AWAY_S, SESSION_OFF_S = 120, 1800, 2 * 3600   # past OFF a session is forgotten
     ONLINE_S, AWAY_S = 60, 900   # seen within a minute = online; within 15 min = away
 
     def workers(self) -> list[dict]:
@@ -771,6 +771,13 @@ class Hopper:
                                "online" if age < self.ONLINE_S else "away" if age < self.AWAY_S else "offline")
             w["seen_ago_s"] = round(age, 1)
             out.append(w)
+        # A worker or session that is no longer live (offline, holding no running job) is
+        # forgotten, not listed forever; it reappears the moment it claims or pings again.
+        dead = [w["name"] for w in out if w["status"] == "offline" and not w["running"]]
+        if dead:
+            with self._tx() as db:
+                db.executemany("DELETE FROM workers WHERE name = ?", [(n,) for n in dead])
+            out = [w for w in out if w["name"] not in dead]
         return out
 
     def activity(self, limit: int = 40, since_id: int = 0) -> list[dict]:

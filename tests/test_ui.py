@@ -39,6 +39,12 @@ class Presence(unittest.TestCase):
         self.hop._db.execute("UPDATE workers SET last_seen = last_seen - 120")
         self.assertEqual(self.hop.workers()[0]["status"], "away")
         self.hop._db.execute("UPDATE workers SET last_seen = last_seen - 3600")
+        self.assertEqual(self.hop.workers(), [])   # gone for good: no longer live, holds no job
+
+    def test_offline_worker_holding_a_job_is_kept(self):
+        self.hop.add("x", queue="q")
+        self.hop.claim("w", queues="q")
+        self.hop._db.execute("UPDATE workers SET last_seen = last_seen - 4000")
         self.assertEqual(self.hop.workers()[0]["status"], "offline")
 
     def test_overview_shape(self):
