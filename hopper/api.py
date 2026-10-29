@@ -10,6 +10,8 @@ OPS: dict[str, str] = {
     "cancel": "produce",
     "bump": "produce",
     "answer": "produce",
+    "remove": "produce",    # finished jobs only; open ones must be cancelled first
+    "retry": "produce",     # like cancel: the dashboard token must be able to re-run a failed job
     # reading
     "show": "read",
     "list": "read",
@@ -32,7 +34,6 @@ OPS: dict[str, str] = {
     "record_usage": "work",
     "ping": "work",
     # housekeeping
-    "retry": "admin",
     "flush": "admin",
     "gc": "admin",
 }
@@ -49,7 +50,7 @@ SCOPES: dict[str, set[str]] = {
 WORKER_OPS = {"claim", "heartbeat", "complete", "fail", "release", "ask", "split", "wait",
               "record_usage", "ping"}
 # Operations that record who did it.
-ACTOR_OPS = {"add", "cancel", "bump", "answer", "retry"}
+ACTOR_OPS = {"add", "cancel", "bump", "answer", "retry", "remove"}
 
 
 def allowed(token_scopes, op: str) -> bool:

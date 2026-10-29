@@ -158,6 +158,27 @@ class Outcomes(Base):
             self.h.cancel(j["id"])
 
 
+class Remove(Base):
+    def test_removes_finished_jobs_and_history_only(self):
+        done = self.h.add("a", key="k")
+        self.h.claim("w")
+        self.h.complete(done["id"], "w", "ok")
+        gone = self.h.add("b")
+        self.h.cancel(gone["id"])
+        live = self.h.add("c")
+        res = self.h.remove([done["id"], gone["id"], live["id"], "j_nope"])
+        self.assertEqual(sorted(res["removed"]), sorted([done["id"], gone["id"]]))
+        self.assertEqual(set(res["skipped"]), {live["id"], "j_nope"})
+        with self.assertRaises(HopperError):
+            self.h.show(done["id"])
+        self.assertEqual(self.h.show(live["id"])["status"], "queued")
+        self.assertNotEqual(self.h.add("a again", key="k")["id"], done["id"])   # key is free again
+
+    def test_remove_needs_ids(self):
+        with self.assertRaises(HopperError):
+            self.h.remove([])
+
+
 class Idempotency(Base):
     def test_key_dedupes_while_open(self):
         a = self.h.add("fix ticker", key="ticker")

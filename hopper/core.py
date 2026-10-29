@@ -437,6 +437,39 @@ class Hopper:
             self._finish(db, job, "cancelled", actor or "user", reason=reason or "cancelled")
             return self._get(db, job_id)
 
+    def remove(self, job_ids, actor: str | None = None) -> dict:
+        """Delete finished jobs (done, failed or cancelled) and their history, one or many at once.
+
+        Open jobs are skipped, not deleted: cancel them first. So are jobs that still have open
+        sub-jobs. Usage records stay, so cost totals don't change. Returns the ids removed and,
+        for every id skipped, why.
+        """
+        ids = list(dict.fromkeys(_list(job_ids)))
+        if not ids:
+            raise HopperError("remove needs at least one job id")
+        removed, skipped = [], {}
+        with self._tx() as db:
+            for jid in ids:
+                row = db.execute("SELECT status FROM jobs WHERE id = ?", (jid,)).fetchone()
+                if row is None:
+                    skipped[jid] = "no such job"
+                elif row[0] not in TERMINAL_STATES:
+                    skipped[jid] = f"is {row[0]}; cancel it first"
+                elif db.execute("SELECT 1 FROM jobs WHERE parent_id = ? AND status IN "
+                                f"({','.join('?' * len(OPEN_STATES))}) LIMIT 1",
+                                (jid, *OPEN_STATES)).fetchone():
+                    skipped[jid] = "has open sub-jobs"
+                else:
+                    removed.append(jid)
+            for chunk in (removed[i:i + 500] for i in range(0, len(removed), 500)):
+                marks = ",".join("?" * len(chunk))
+                db.execute(f"DELETE FROM events WHERE job_id IN ({marks})", chunk)
+                db.execute(f"DELETE FROM deps WHERE job_id IN ({marks}) OR depends_on IN ({marks})",
+                           chunk + chunk)
+                db.execute(f"DELETE FROM outbox WHERE job_id IN ({marks})", chunk)
+                db.execute(f"DELETE FROM jobs WHERE id IN ({marks})", chunk)
+        return {"removed": removed, "skipped": skipped}
+
     def bump(self, job_id: str, priority, actor: str | None = None) -> dict:
         prio = parse_priority(priority)
         with self._tx() as db:

@@ -351,6 +351,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = cmd("retry", "give a failed or cancelled job a fresh start")
     sp.add_argument("job_id")
 
+    sp = cmd("rm", "delete finished jobs (done, failed, cancelled) and their history")
+    sp.add_argument("job_ids", nargs="*", help="job ids; or use the filters below")
+    sp.add_argument("-s", "--status", help="remove every job in this status (comma-separated): done, failed, cancelled")
+    sp.add_argument("-q", "--queue")
+    sp.add_argument("-P", "--project")
+    sp.add_argument("-t", "--tags")
+    sp.add_argument("--older-than", type=float, metavar="DAYS", help="only jobs finished more than DAYS ago")
+    sp.add_argument("-y", "--yes", action="store_true", help="don't ask before removing several")
+
     sp = cmd("workers", "who can run jobs: machine, queues and capabilities")
     sp.add_argument("--json", action="store_true")
 
@@ -668,6 +677,29 @@ def _run(a) -> int:
         "bump": lambda: hop.bump(job_id=a.job_id, priority=a.priority, actor=_default_worker()),
         "retry": lambda: hop.retry(job_id=a.job_id, actor=_default_worker()),
     }
+    if a.cmd == "rm":
+        ids = list(a.job_ids)
+        if a.status or a.queue or a.project or a.tags or a.older_than is not None:
+            status = a.status or "done,failed,cancelled"
+            if set(status.replace(" ", "").split(",")) - {"done", "failed", "cancelled"}:
+                print("hop: rm only deletes done, failed or cancelled jobs; cancel open ones first", file=sys.stderr)
+                return 2
+            cutoff = time.time() - 86400 * a.older_than if a.older_than is not None else None
+            ids += [j["id"] for j in hop.list(status=status, queue=a.queue, project=a.project,
+                                              tags=a.tags, limit=100000)
+                    if cutoff is None or (j.get("finished_at") or 0) < cutoff]
+        if not ids:
+            print("hop: nothing to remove (give job ids or a filter such as -s failed)", file=sys.stderr)
+            return 2
+        if len(ids) > 1 and not a.yes and sys.stdin.isatty():
+            if input(f"Remove {len(ids)} jobs and their history? [y/N] ").strip().lower() not in ("y", "yes"):
+                return 1
+        res = hop.remove(job_ids=ids, actor=_default_worker())
+        print(f"removed {len(res['removed'])} job(s)")
+        for jid, why in res["skipped"].items():
+            print(f"  skipped {jid}: {why}")
+        return 0 if res["removed"] or not res["skipped"] else 1
+
     if a.cmd in simple:
         print(_row(simple[a.cmd]()))
         return 0

@@ -147,6 +147,7 @@ tbody tr:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
           <div class="sp"></div>
           <select class="f" id="qSel"><option value="">All queues</option></select>
           <button class="btn sm danger" id="retryAll" hidden></button>
+          <button class="btn sm danger" id="removeAll" hidden></button>
           <input class="f" id="search" placeholder="Search title, id, tag, source…" size="26">
         </div>
         <div class="scroll"><table><thead><tr><th>Status</th><th>P</th><th>Queue</th><th>Job</th><th>Worker</th><th>Age</th><th>Try</th><th></th></tr></thead><tbody id="jobs"></tbody></table></div>
@@ -372,6 +373,10 @@ function renderJobs() {
   const failedRows = tab === "failed" ? rows.filter(j => j.status === "failed") : [];
   const ra = $("#retryAll"); ra.hidden = !failedRows.length; ra.textContent = "Retry all (" + failedRows.length + ")";
   ra.onclick = () => retryMany(failedRows);
+  const finishedRows = rows.filter(j => ["done", "failed", "cancelled"].includes(j.status));
+  const rm = $("#removeAll"); rm.hidden = !finishedRows.length || !["done", "failed", "cancelled", "all"].includes(tab);
+  rm.textContent = "Remove all (" + finishedRows.length + ")";
+  rm.onclick = () => removeMany(finishedRows);
   $("#jobsNote").textContent = "Showing the latest " + rows.length + " of " + total + " (history older than that is in `hop ls -s all`).";
   clear($("#jobs"), rows.map(j => {
     const fin = ["done", "failed", "cancelled"].includes(j.status);
@@ -388,7 +393,8 @@ function renderJobs() {
       h("td", {class: "sub"}, j.lease_owner || ""),
       h("td", {class: "sub age", style: "white-space:nowrap", "data-kind": kind, "data-ts": ts}, ageText(kind, ts)),
       h("td", {class: "sub"}, j.attempts + "/" + j.max_attempts),
-      h("td", {}, failed ? h("button", {class: "btn sm", onclick: e => { e.stopPropagation(); retryMany([j]); }}, "Retry") : null));
+      h("td", {style: "white-space:nowrap"}, failed ? h("button", {class: "btn sm", onclick: e => { e.stopPropagation(); retryMany([j]); }}, "Retry") : null,
+        fin ? h("button", {class: "btn sm", title: "Delete this job and its history", onclick: e => { e.stopPropagation(); removeMany([j]); }}, "Remove") : null));
   }));
 }
 async function retryMany(list) {
@@ -396,6 +402,14 @@ async function retryMany(list) {
   let ok = 0, bad = 0;
   for (const j of list) { try { await api("retry", {job_id: j.id}); ok++; } catch (e) { bad++; } }
   toast(bad ? "Re-queued " + ok + ", " + bad + " could not be retried" : "Re-queued " + ok);
+}
+async function removeMany(list) {
+  if (!list.length || (list.length > 1 && !confirm("Remove " + list.length + " finished jobs and their history? This can't be undone."))) return;
+  try {
+    const r = await api("remove", {job_ids: list.map(j => j.id)});
+    const n = (r.removed || []).length, s = Object.keys(r.skipped || {}).length;
+    toast(s ? "Removed " + n + ", skipped " + s : "Removed " + n);
+  } catch (e) { toast("Could not remove: " + e.message); }
 }
 function renderFeed() {
   const top = $("#feed").scrollTop;
