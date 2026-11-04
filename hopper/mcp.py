@@ -11,6 +11,7 @@ import json
 import os
 import socket
 import sys
+import traceback
 
 from . import __version__
 from .client import connect
@@ -221,8 +222,14 @@ def run(stdin=None, stdout=None) -> None:
         except ValueError:
             reply(None, error={"code": -32700, "message": "parse error"})
             continue
+        if not isinstance(msg, dict):
+            reply(None, error={"code": -32600, "message": "invalid request"})
+            continue
         method, msg_id = msg.get("method"), msg.get("id")
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            reply(msg_id, error={"code": -32602, "message": "params must be an object"})
+            continue
         if msg_id is None:  # notifications (e.g. notifications/initialized) need no reply
             continue
         if method == "initialize":
@@ -248,5 +255,9 @@ def run(stdin=None, stdout=None) -> None:
                                             "text": json.dumps(result, indent=1, default=str)}]})
             except (HopperError, TypeError, KeyError) as exc:
                 reply(msg_id, {"content": [{"type": "text", "text": f"Error: {exc}"}], "isError": True})
+            except Exception as exc:  # one bad call must not end the session
+                traceback.print_exc()   # stdout is the protocol; stderr is the log
+                reply(msg_id, {"content": [{"type": "text", "text": f"Error: {type(exc).__name__}: {exc}"}],
+                               "isError": True})
         else:
             reply(msg_id, error={"code": -32601, "message": f"method not found: {method}"})

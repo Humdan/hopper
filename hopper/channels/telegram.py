@@ -61,6 +61,10 @@ class Telegram(Channel):
             raise HopperError(f"telegram {method}: HTTP {exc.code} {reason}".strip()) from None
         except urllib.error.URLError as exc:
             raise HopperError(f"telegram unreachable: {exc.reason}") from None
+        except OSError as exc:  # a timeout or reset while reading the answer
+            raise HopperError(f"telegram unreachable: {exc}") from None
+        except ValueError:
+            raise HopperError(f"telegram {method}: answered with something that isn't JSON") from None
         if not data.get("ok"):
             raise HopperError(f"telegram {method}: {data.get('description', 'not ok')}")
         return data.get("result")
@@ -90,6 +94,10 @@ class Telegram(Channel):
             raise HopperError(f"telegram {method}: HTTP {exc.code}") from None
         except urllib.error.URLError as exc:
             raise HopperError(f"telegram unreachable: {exc.reason}") from None
+        except OSError as exc:  # a timeout or reset while reading the answer
+            raise HopperError(f"telegram unreachable: {exc}") from None
+        except ValueError:
+            raise HopperError(f"telegram {method}: answered with something that isn't JSON") from None
         if not data.get("ok"):
             raise HopperError(f"telegram {method}: {data.get('description', 'not ok')}")
         return str(data["result"].get("message_id", ""))

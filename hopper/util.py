@@ -4,7 +4,10 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import shutil
 import subprocess
+import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -27,6 +30,33 @@ ALL_STATES = OPEN_STATES + TERMINAL_STATES
 
 class HopperError(Exception):
     """A request Hopper refuses, with a message meant for the caller."""
+
+
+def _run_notifier(exe: str, key: str, text: str) -> None:
+    try:
+        proc = subprocess.run([exe, "-l", "warn", "--key", key, f"hopper: {text}"],
+                              capture_output=True, text=True, timeout=45)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"hopper: could not run {exe}: {exc}", file=sys.stderr, flush=True)
+        return
+    if proc.returncode != 0:
+        print(f"hopper: {exe} exited {proc.returncode}", file=sys.stderr, flush=True)
+
+
+def alert(key: str, text: str) -> None:
+    """Log a failure nobody is waiting on, and pass it to `hopper-notify` if this machine has one.
+
+    Callers often hold the queue's lock, so the notifier runs on its own thread (not a daemon:
+    a one-shot `hop flush` waits for it). It only ever logs its own failure: `hopper-notify` may
+    send through `hop send`, which never comes back here, so a failed send can't loop. Services
+    often run without ~/.local/bin on PATH, so look there and beside the running `hop` too.
+    """
+    print(f"hopper: {text}", file=sys.stderr, flush=True)
+    where = [os.environ.get("PATH", os.defpath), os.path.dirname(os.path.abspath(sys.argv[0])),
+             os.path.expanduser("~/.local/bin")]
+    exe = shutil.which("hopper-notify", path=os.pathsep.join(where))
+    if exe:
+        threading.Thread(target=_run_notifier, args=(exe, key, text)).start()
 
 
 def new_id(prefix: str = "j") -> str:

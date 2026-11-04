@@ -20,6 +20,7 @@ import json
 import os
 import threading
 import time
+import traceback
 import urllib.parse
 from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,9 +29,10 @@ from . import __version__, cluster
 from .api import ACTOR_OPS, OPS, WORKER_OPS, allowed
 from .config import resolve_secret
 from .core import Hopper
-from .util import HopperError
+from .util import HopperError, alert
 
 MAX_BODY = 1 << 20  # 1 MiB is plenty for a job
+HOUSEKEEPING_ALERT_AFTER = 6  # failed ticks in a row before someone is told
 
 
 def _mtime(path: str) -> float:
@@ -129,8 +131,11 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
                     result = getattr(hop, op)(**args)
             except HopperError as exc:
                 return self._send(409, {"ok": False, "error": str(exc)})
-            except TypeError as exc:
+            except (TypeError, ValueError) as exc:
                 return self._send(400, {"ok": False, "error": f"bad arguments for {op}: {exc}"})
+            except Exception:  # answer, rather than dropping the connection with no explanation
+                traceback.print_exc()
+                return self._send(500, {"ok": False, "error": f"{op} failed on the server; see its log"})
             self._send(200, {"ok": True, "result": result})
 
         def _page(self) -> None:
@@ -198,14 +203,23 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
             if url.path == "/v1/jobs":
                 args = {k: q[k] for k in ("status", "queue", "tags", "source") if k in q}
                 if "limit" in q:
-                    args["limit"] = int(q["limit"])
+                    try:
+                        args["limit"] = int(q["limit"])
+                    except ValueError:
+                        return self._send(400, {"ok": False, "error": "limit must be a number"})
                 return self._call("list", args)
             if url.path.startswith("/v1/jobs/"):
                 return self._call("show", {"job_id": url.path.rsplit("/", 1)[1]})
             self._send(404, {"ok": False, "error": "not found"})
 
         def do_POST(self):
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0:   # read(-1) would wait for the client to hang up
+                self.close_connection = True
+                return self._send(400, {"ok": False, "error": "bad Content-Length"})
             if length > MAX_BODY:
                 return self._send(413, {"ok": False, "error": "body too large"})
             raw = self.rfile.read(length) if length else b"{}"
@@ -223,13 +237,19 @@ def serve(hop: Hopper, host: str = "127.0.0.1", port: int = 8770, no_auth: bool 
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     def housekeeping():
+        failing = 0
         while not stop.wait(housekeeping_s):
             try:
                 with lock:
                     hop.stats()  # reaps expired leases
                     hop.flush()
+                failing = 0
             except Exception as exc:  # keep serving; report and try again next tick
+                failing += 1
                 print(f"hopper: housekeeping error: {exc}", flush=True)
+                if failing == HOUSEKEEPING_ALERT_AFTER:  # once per outage, not every tick
+                    alert("hopper:housekeeping", f"housekeeping failed {failing} times in a row, so leases "
+                                                 f"aren't reaped and notices aren't sent: {exc}")
 
     threading.Thread(target=housekeeping, daemon=True).start()
     if not quiet:
