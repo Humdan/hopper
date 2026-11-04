@@ -14,7 +14,7 @@ from contextlib import contextmanager
 
 from . import sinks
 from .config import Config, load as load_config
-from .util import (ALL_STATES, OPEN_STATES, TERMINAL_STATES, HopperError, new_id, now,
+from .util import (ALL_STATES, OPEN_STATES, TERMINAL_STATES, HopperError, alert, new_id, now,
                    parse_duration, parse_priority, parse_since, parse_when)
 
 SCHEMA_VERSION = 4
@@ -1025,6 +1025,7 @@ class Hopper:
             "SELECT * FROM outbox WHERE delivered_at IS NULL AND next_at <= ? AND attempts < ? "
             "ORDER BY id LIMIT ?", (now(), _OUTBOX_GIVE_UP, limit)).fetchall()
         sent = failed = 0
+        gave_up: dict[str, list] = {}
         for r in due:
             try:
                 sinks.deliver(r["target"], json.loads(r["payload"]), self.cfg)
@@ -1034,10 +1035,19 @@ class Hopper:
                 self._db.execute("UPDATE outbox SET attempts = attempts + 1, next_at = ?, "
                                  "last_error = ? WHERE id = ?",
                                  (now() + backoff, str(exc)[:500], r["id"]))
+                if r["attempts"] + 1 >= _OUTBOX_GIVE_UP:
+                    gave_up.setdefault(r["target"].partition(":")[0], []).append((r["job_id"], str(exc)))
             else:
                 sent += 1
                 self._db.execute("UPDATE outbox SET delivered_at = ?, attempts = attempts + 1 "
                                  "WHERE id = ?", (now(), r["id"]))
+        # Only the scheme: a webhook target can carry a secret in its URL. Said once per notice,
+        # on the attempt that gives up, so a notice stuck for days doesn't repeat itself.
+        for scheme, notices in gave_up.items():
+            jobs = ", ".join(job_id for job_id, _ in notices[:5])
+            alert(f"hopper:undeliverable:{scheme}",
+                  f"{len(notices)} {scheme} notice(s) undeliverable after {_OUTBOX_GIVE_UP} attempts "
+                  f"and will not be retried (jobs: {jobs}). Last error: {notices[-1][1][:200]}")
         return {"sent": sent, "failed": failed}
 
     def gc(self, days: float | None = None) -> dict:

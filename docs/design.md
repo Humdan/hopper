@@ -128,7 +128,9 @@ full question/answer thread in the job.
 ## Sinks (reply_to)
 
 `reply_to` is a URI. Hopper delivers `done`, `failed` and `needs_input` notices to it
-through an outbox table, so deliveries survive crashes and are retried.
+through an outbox table, so deliveries survive crashes and are retried. After 10 failed
+attempts a notice is kept for inspection (`hop stats` counts it as undeliverable) and the
+give-up is logged to stderr and passed to `hopper-notify` if that command exists.
 
 | Scheme | Delivery |
 |---|---|

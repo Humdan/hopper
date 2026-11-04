@@ -761,7 +761,7 @@ def _run(a) -> int:
     if a.cmd == "flush":
         r = hop.flush()
         print(f"sent {r['sent']}, failed {r['failed']}")
-        return 0
+        return 1 if r["failed"] else 0
 
     if a.cmd == "serve":
         if os.environ.get("HOPPER_URL"):

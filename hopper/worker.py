@@ -264,16 +264,19 @@ class Runner:
             try:
                 self.hop.fail(job_id=run["job"]["id"], worker=run["worker"], retry=True,
                               reason=f"ran longer than {int(self.max_runtime)}s and was stopped")
-            except HopperError:
-                pass
+            except HopperError as exc:
+                print(f"[{self.name}] could not fail {run['job']['id']} after max runtime: {exc}",
+                      file=sys.stderr, flush=True)
             self.running.pop(slot)["log"].close()
             print(f"[{self.name}] slot {slot}: {run['job']['id']} stopped at max runtime", flush=True)
             return
         if t - run["beat"] > min(60.0, run["job"]["timeout"] / 3):
             try:
                 self.hop.heartbeat(job_id=run["job"]["id"], worker=run["worker"])
-            except HopperError:
-                pass  # the agent already reported (done/ask/split); nothing to keep alive
+            except HopperError as exc:
+                # Usually the agent already reported (done/ask/split) and there's nothing to keep
+                # alive, but it's also how a lost lease or an unreachable server looks.
+                print(f"[{self.name}] heartbeat for {run['job']['id']}: {exc}", file=sys.stderr, flush=True)
             run["beat"] = t
 
     @staticmethod
@@ -331,8 +334,8 @@ class Runner:
             if hasattr(self.hop._hop, "flush") and time.time() - last_flush > 10:
                 try:
                     self.hop.flush()
-                except HopperError:
-                    pass
+                except HopperError as exc:
+                    print(f"[{self.name}] flush failed: {exc}", file=sys.stderr, flush=True)
                 last_flush = time.time()
             if not claimed:
                 self.stopping.wait(self.poll if not self.running else min(self.poll, 1.0))
@@ -342,7 +345,8 @@ class Runner:
             try:
                 self.hop.release(job_id=run["job"]["id"], worker=run["worker"],
                                  reason="worker shut down")
-            except HopperError:
-                pass
+            except HopperError as exc:
+                print(f"[{self.name}] could not release {run['job']['id']}: {exc}",
+                      file=sys.stderr, flush=True)
             run["log"].close()
         return 0
